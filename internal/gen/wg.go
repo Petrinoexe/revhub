@@ -344,6 +344,10 @@ fi
 candidate=$(mktemp "${XRAY_CONFIG}.revhub.XXXXXX")
 trap 'rm -f -- "$candidate"' EXIT
 install -m 640 xray.json "$candidate"
+# Конфиг читает и панель (диагностика сравнивает sha256). Панель работает
+# непривилегированно, поэтому отдаём файл группе каталога состояния, а не миру.
+cfg_group=$(stat -c %G "$STATE_DIR" 2>/dev/null || true)
+if [ -n "$cfg_group" ] && [ "$cfg_group" != root ]; then chgrp "$cfg_group" "$candidate" 2>/dev/null || true; fi
 mv -fT -- "$candidate" "$XRAY_CONFIG"
 if ! systemctl restart xray || ! sleep 1 || ! systemctl is-active --quiet xray; then
   echo "[revhub] Xray не запустился. Проверь journalctl -u xray" >&2

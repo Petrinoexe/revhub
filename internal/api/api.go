@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -292,6 +293,7 @@ func (s *Server) runners() diag.Runners {
 	return diag.Runners{
 		Local:      diag.Local{},
 		ConfigPath: os.Getenv("XRAY_CONFIG"), // песочница/нестандартный путь
+		WG:         wgRunner(),
 		RemoteFor: func(nodeID string) (diag.Runner, error) {
 			var node model.Node
 			for _, n := range s.Store.Snapshot().Nodes {
@@ -542,6 +544,24 @@ func (s *Server) provisionNode(w http.ResponseWriter, r *http.Request) {
 		s.Apply.Start("provision")
 	}
 	writeJSON(w, http.StatusOK, rep)
+}
+
+// wgRunner выполняет `wg ...` от root: `wg show <iface>` требует CAP_NET_ADMIN,
+// а панель работает непривилегированно. Правило sudo у неё уже есть — на
+// собственный бинарь, так что подкоманда `wg` не расширяет права.
+func wgRunner() func(args ...string) (string, error) {
+	return func(args ...string) (string, error) {
+		if os.Geteuid() == 0 {
+			out, err := exec.Command("wg", args...).CombinedOutput()
+			return string(out), err
+		}
+		bin, err := os.Executable()
+		if err != nil {
+			return "", err
+		}
+		out, err := exec.Command("sudo", append([]string{"-n", bin, "wg"}, args...)...).CombinedOutput()
+		return string(out), err
+	}
 }
 
 // checkNodes выполняет проверку немедленно (кнопка «проверить»).

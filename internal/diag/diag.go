@@ -99,6 +99,20 @@ type Runners struct {
 	RemoteFor func(nodeID string) (Runner, error)
 	// ConfigPath — файл конфига ядра на узле. Пусто = боевой путь установщика.
 	ConfigPath string
+	// WG выполняет `wg ...` на локальном узле от root (через sudo). Без него
+	// `wg show <iface>` из-под панели отвечает «Operation not permitted».
+	WG func(args ...string) (string, error)
+}
+
+// runWG выполняет wg-команду: на локальном узле через привилегированный
+// помощник, на удалённом — обычным SSH-shell (там мы root).
+func (r Runners) runWG(run Runner, isLocal bool, args ...string) string {
+	if isLocal && r.WG != nil {
+		out, _ := r.WG(args...)
+		return out
+	}
+	out, _ := run.Run("wg " + strings.Join(args, " "))
+	return out
 }
 
 func (r Runners) configPath() string {
@@ -134,43 +148,56 @@ func Node(st model.State, nodeID, localNode string, rs Runners) (Report, error) 
 	}
 	rep := Report{NodeID: nodeID, Local: isLocal}
 
-	if out, err := r.Run("systemctl is-active xray 2>/dev/null || true"); err != nil || strings.TrimSpace(out) != "active" {
-		rep.Items = append(rep.Items, bad("служба xray", strings.TrimSpace(out),
-			"ядро не запущено: systemctl status xray; journalctl -u xray -n 50"))
+	// На узле, которому ядро не нужно (чистый выход для WG-туннеля), проверять
+	// его бессмысленно: «inactive» там — норма, а не авария.
+	needXray := gen.NeedsXray(st, nodeID)
+	if needXray {
+		if out, err := r.Run("systemctl is-active xray 2>/dev/null || true"); err != nil || strings.TrimSpace(out) != "active" {
+			rep.Items = append(rep.Items, bad("служба xray", strings.TrimSpace(out),
+				"ядро не запущено: systemctl status xray; journalctl -u xray -n 50"))
+		} else {
+			rep.Items = append(rep.Items, ok("служба xray", "active"))
+		}
 	} else {
-		rep.Items = append(rep.Items, ok("служба xray", "active"))
+		rep.Items = append(rep.Items, ok("служба xray", "на этом узле не нужна (только WireGuard)"))
 	}
 
 	// Ключевая проверка: лежит ли на узле ровно тот конфиг, который панель
 	// только что сгенерировала. Расхождение = «настройки не применены».
-	if files, err := gen.Artifacts(st, nodeID); err == nil {
-		want := ""
-		for _, f := range files {
-			if f.Name == "xray.json" {
-				sum := sha256.Sum256([]byte(f.Content))
-				want = hex.EncodeToString(sum[:])
+	// Узлу без ядра этот пункт не нужен вовсе.
+	if needXray {
+		files, aerr := gen.Artifacts(st, nodeID)
+		switch {
+		case aerr != nil:
+			// Модель не рендерится сама по себе (например, битые ключи WG):
+			// молчать нельзя, иначе проверка выглядит успешной.
+			rep.Items = append(rep.Items, bad("конфиг ядра на узле",
+				"панель не смогла собрать конфиг: "+aerr.Error(),
+				"исправь ошибку в состоянии — без валидного конфига применять нечего"))
+		default:
+			want := ""
+			for _, f := range files {
+				if f.Name == "xray.json" {
+					sum := sha256.Sum256([]byte(f.Content))
+					want = hex.EncodeToString(sum[:])
+				}
+			}
+			out, _ := r.Run("sha256sum " + rs.configPath() + " 2>/dev/null || true")
+			got := ""
+			if f := strings.Fields(out); len(f) > 0 {
+				got = f[0]
+			}
+			switch {
+			case got == "":
+				rep.Items = append(rep.Items, bad("конфиг ядра на узле", "не читается (нет файла или прав)",
+					"конфиг не применялся: нажми «применить» на узле; панель читает его через группу"))
+			case want != "" && got == want:
+				rep.Items = append(rep.Items, ok("конфиг ядра на узле", "совпадает с панелью"))
+			default:
+				rep.Items = append(rep.Items, bad("конфиг ядра на узле", "sha256 "+hashHead(got)+" ≠ "+hashHead(want),
+					"на узле старый конфиг: нажми «применить» на этом узле"))
 			}
 		}
-		out, _ := r.Run("sha256sum " + rs.configPath() + " 2>/dev/null || true")
-		got := ""
-		if f := strings.Fields(out); len(f) > 0 {
-			got = f[0]
-		}
-		switch {
-		case got == "":
-			rep.Items = append(rep.Items, bad("конфиг ядра на узле", "файла нет",
-				"конфиг не применялся: нажми «применить» на узле"))
-		case want != "" && got == want:
-			rep.Items = append(rep.Items, ok("конфиг ядра на узле", "совпадает с панелью"))
-		default:
-			rep.Items = append(rep.Items, bad("конфиг ядра на узле", "sha256 "+hashHead(got)+" ≠ "+hashHead(want),
-				"на узле старый конфиг: нажми «применить» на этом узле"))
-		}
-	} else {
-		// Модель не рендерится сама по себе (например, битые ключи WG): молчать
-		// нельзя, иначе проверка выглядит успешной.
-		rep.Items = append(rep.Items, bad("конфиг ядра на узле", "панель не смогла собрать конфиг: "+err.Error(),
-			"исправь ошибку в состоянии — без валидного конфига применять нечего"))
 	}
 
 	// Слушающиеся порты: инбаунды и слушатели туннелей.
@@ -223,7 +250,7 @@ func Node(st model.State, nodeID, localNode string, rs Runners) (Report, error) 
 		}
 	}
 	if len(wgIfaces) > 0 {
-		out, _ := r.Run("wg show interfaces 2>/dev/null || true")
+		out := rs.runWG(r, isLocal, "show", "interfaces")
 		up := strings.Fields(out)
 		var missing []string
 		for _, iface := range wgIfaces {
@@ -309,7 +336,7 @@ func Tunnel(st model.State, tunnelID, host, localNode string, rs Runners) (Repor
 	}
 	iface := t.WGInterface()
 
-	if out, _ := from.Run("wg show " + iface + " latest-handshakes 2>/dev/null || true"); strings.TrimSpace(out) == "" {
+	if out := rs.runWG(from, fromLocal, "show", iface, "latest-handshakes"); strings.TrimSpace(out) == "" {
 		rep.Items = append(rep.Items, bad("рукопожатие WireGuard", "нет данных: интерфейс "+iface+" не поднят",
 			"применить конфигурацию на обоих узлах и проверить, что UDP-порт слушается"))
 	} else {

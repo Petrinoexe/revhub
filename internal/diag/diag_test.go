@@ -92,6 +92,59 @@ func TestNodeReportsMissingListener(t *testing.T) {
 	t.Fatalf("проверки портов нет: %+v", rep.Items)
 }
 
+// Узлу без ядра (чистый выход для WG) не нужны ни служба xray, ни сверка
+// конфига — «inactive» и «файла нет» там норма, а не авария.
+func TestNodeWithoutXraySkipsCoreChecks(t *testing.T) {
+	st := model.State{Version: model.StateVersion,
+		Nodes: []model.Node{{ID: "hub"}, {ID: "exit"}},
+		Tunnels: []model.Tunnel{{ID: "tn", Name: "eu", Kind: model.TunnelWGReverse,
+			FromNode: "hub", ToNode: "exit", Enabled: true, Subnet: "10.77.3.0/30", ListenPort: 51820}}}
+	r := &fakeRunner{answers: map[string]string{"wg show interfaces": "wg-eu\n"}}
+	rep, err := Node(st, "exit", "hub", Runners{Local: r, RemoteFor: func(string) (Runner, error) { return r, nil }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, it := range rep.Items {
+		if it.Name == "конфиг ядра на узле" {
+			t.Fatalf("на узле без ядра сверка конфига не нужна: %+v", it)
+		}
+		if it.Name == "служба xray" && !it.OK {
+			t.Fatalf("inactive xray на выходе — норма: %+v", it)
+		}
+	}
+}
+
+// `wg show <iface>` требует root: локально диагностика обязана идти через
+// привилегированный помощник, иначе она врёт «интерфейс не поднят».
+func TestNodeUsesPrivilegedWGOnLocalNode(t *testing.T) {
+	st := model.State{Version: model.StateVersion,
+		Nodes: []model.Node{{ID: "hub"}},
+		Tunnels: []model.Tunnel{{ID: "tn", Name: "eu", Kind: model.TunnelWGReverse,
+			FromNode: "hub", ToNode: "exit", Enabled: true, Subnet: "10.77.3.0/30", ListenPort: 51820}}}
+	local := &fakeRunner{}
+	var calls [][]string
+	rs := Runners{Local: local, WG: func(args ...string) (string, error) {
+		calls = append(calls, args)
+		if len(args) == 2 && args[1] == "interfaces" {
+			return "wg-eu\n", nil
+		}
+		return "key 1700000000\n", nil
+	}}
+	rep, err := Node(st, "hub", "hub", rs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(calls) == 0 {
+		t.Fatal("wg вызывался не через помощника")
+	}
+	for _, it := range rep.Items {
+		if it.Name == "интерфейсы WireGuard" && !it.OK {
+			t.Fatalf("интерфейс есть, проверка не прошла: %+v", it)
+		}
+	}
+}
+
+// Порты для firewall: клиентские инбаунды и слушатели туннелей, без дублей.
 func TestTunnelPingUsesInterfaceAndHost(t *testing.T) {
 	st := model.State{Version: model.StateVersion,
 		Nodes: []model.Node{{ID: "hub"}, {ID: "exit", PublicAddr: "203.0.113.9:443"}},
