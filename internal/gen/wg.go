@@ -215,6 +215,11 @@ func WGConfig(st model.State, t model.Tunnel, nodeID string) (string, error) {
 		// Единственная точка стыка двух плоскостей: метка → таблица → интерфейс.
 		// Плюс host-route до дальнего конца в main: по нему панель ходит на
 		// выходной по SSH через туннель, не задевая остальной трафик.
+		// PreUp — защита от тихого перехвата чужой таблицы: если в ней уже есть
+		// default (ручной wg0 на этой же машине), apply падает с объяснением,
+		// а не уводит чужой трафик в наш туннель.
+		fmt.Fprintf(&b, "PreUp = sh -c 'ip route show table %d 2>/dev/null | grep -q \"^default\" && { echo \"revhub: таблица %d уже занята другим default-маршрутом — смени метку туннеля\" >&2; exit 1; }; true'\n",
+			t.Mark, t.Mark)
 		fmt.Fprintf(&b, "PostUp = ip -4 route replace %s/32 dev %%i\n", toAddr)
 		fmt.Fprintf(&b, "PostDown = ip -4 route del %s/32 dev %%i 2>/dev/null || true\n", toAddr)
 		fmt.Fprintf(&b, "PostUp = ip rule add fwmark %d lookup %d 2>/dev/null || true\n", t.Mark, t.Mark)

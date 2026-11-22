@@ -292,12 +292,15 @@ func (s State) NextMark() int {
 	for _, t := range s.Tunnels {
 		used[t.Mark] = true
 	}
-	for i := 0x64; i < 0x1000; i++ {
+	// Метки ниже 0xc8 (200) обычно заняты ручными настройками (VPN-сервер на
+	// этой же машине любит fwmark 100 и таблицу 100), поэтому начинаем с 200:
+	// молча перехватить чужую таблицу хуже, чем иметь запас.
+	for i := 0xc8; i < 0x1000; i++ {
 		if !used[i] {
 			return i
 		}
 	}
-	return 0x64
+	return 0xc8
 }
 
 func (t Tunnel) Tag() string { return TagTunnel + t.Name }
