@@ -271,6 +271,40 @@ func TestProvisionRequiresAddr(t *testing.T) {
 	}
 }
 
+// Каталог артефактов хаба создал установщик от root: по SSH-установка выходного
+// уже прошла, и валить её из-за прав на диагностический каталог нельзя — только
+// сказать, как починить.
+func TestProvisionSurvivesRootOwnedArtifactsDir(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root обходит права каталога")
+	}
+	svc, _, dir := newService(t)
+	locked := filepath.Join(dir, "out", "hub")
+	if err := os.MkdirAll(locked, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(locked, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(locked, 0o750) })
+
+	rep, err := svc.Run(Request{
+		Name: "Новый выход", Addr: "198.51.100.9", HubNodeID: "hub",
+		TunnelKind: model.TunnelWGReverse, TLSBy: "ip", IP: "198.51.100.9",
+		SSHPassword: "secret",
+	})
+	if err != nil {
+		t.Fatalf("установка прервалась из-за прав на каталог: %v", err)
+	}
+	joined := strings.Join(rep.Steps, "\n")
+	if !strings.Contains(joined, "revhub repair") {
+		t.Fatalf("нет подсказки, как починить права:\n%s", joined)
+	}
+	if len(svc.Store.Snapshot().Nodes) != 3 {
+		t.Error("узел должен быть добавлен в состояние")
+	}
+}
+
 func keys(m map[string]string) []string {
 	var out []string
 	for k := range m {

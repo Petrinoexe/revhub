@@ -679,6 +679,39 @@ exit 0`)
 	}
 }
 
+// Каталог артефактов, созданный установщиком от root, должен достаться панели:
+// иначе первое же сохранение падает с «mkdir .../.render-*: permission denied».
+func TestChownTreeCoversDirParentAndFiles(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "out", "node-1")
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range []string{"xray.json", "apply.sh"} {
+		if err := os.WriteFile(filepath.Join(dir, f), []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	touched := map[string]bool{}
+	chownTree(dir, 1234, 1234, func(p string, _, _ int) error {
+		touched[p] = true
+		return nil
+	})
+	for _, want := range []string{
+		filepath.Join(root, "out"),
+		dir,
+		filepath.Join(dir, "xray.json"),
+		filepath.Join(dir, "apply.sh"),
+	} {
+		if !touched[want] {
+			t.Errorf("не передан панели: %s", want)
+		}
+	}
+	if st, err := os.Stat(dir); err != nil || st.Mode().Perm() != 0o750 {
+		t.Errorf("права каталога: %v", st.Mode().Perm())
+	}
+}
+
 // Repair (после обновления) в dry-run показывает план и не трогает состояние
 // и сертификаты — их не должно касаться и в реальном прогоне.
 func TestRepairDryRunKeepsState(t *testing.T) {

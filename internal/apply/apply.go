@@ -12,7 +12,9 @@ package apply
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -217,7 +219,22 @@ func (s *Service) applyNode(st model.State, n model.Node) NodeResult {
 	dir := filepath.Join(s.OutDir, n.ID)
 	man, err := gen.WriteArtifacts(dir, files)
 	if err != nil {
-		return done(err, "")
+		// Каталог артефактов мог создать установщик от root: панель не может
+		// писать туда `.render-*`. Это не повод не применять конфиг — рендерим
+		// в приватный каталог и говорим, как починить права.
+		if !errors.Is(err, fs.ErrPermission) {
+			return done(err, "")
+		}
+		tmp, terr := os.MkdirTemp("", "revhub-artifacts-"+n.ID+"-*")
+		if terr != nil {
+			return done(err, "")
+		}
+		defer os.RemoveAll(tmp)
+		dir = tmp
+		s.warn("каталог " + filepath.Join(s.OutDir, n.ID) + " недоступен для записи: выполни `sudo revhub repair`")
+		if man, err = gen.WriteArtifacts(dir, files); err != nil {
+			return done(err, "")
+		}
 	}
 	man.Node = n.ID
 	if err := os.WriteFile(filepath.Join(dir, "manifest.json"), man.JSON(), 0o640); err != nil {

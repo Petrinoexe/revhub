@@ -113,6 +113,32 @@ func TestApplyOffLeavesNodeUntouched(t *testing.T) {
 	}
 }
 
+// Каталог артефактов создал установщик от root: сохранение не должно падать,
+// конфиг применяется, но в предупреждениях есть, как починить права.
+func TestApplyFallsBackWhenArtifactsDirIsNotWritable(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root обходит права каталога")
+	}
+	helper := writeHelper(t, "#!/bin/sh\nexit 0\n")
+	svc, dir := newService(t, helper, model.Node{ID: "hub"})
+	locked := filepath.Join(dir, "out", "hub")
+	if err := os.MkdirAll(locked, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(locked, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(locked, 0o750) })
+
+	rep := svc.ApplyNow("save")
+	if len(rep.Nodes) != 1 || !rep.Nodes[0].OK {
+		t.Fatalf("применение не прошло: %+v", rep.Nodes)
+	}
+	if len(rep.Warnings) == 0 || !strings.Contains(rep.Warnings[0], "revhub repair") {
+		t.Fatalf("нет предупреждения про права: %+v", rep.Warnings)
+	}
+}
+
 // Ошибка рендера (например, у инбаунда нет ни одного клиента) — провал
 // применения, а не «пропущено»: иначе UI её спрячет и всё выглядит зелёным.
 func TestApplyRenderErrorIsFailureNotSkip(t *testing.T) {

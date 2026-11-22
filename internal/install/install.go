@@ -275,6 +275,7 @@ func Run(o Options) (*Report, error) {
 		if err := os.WriteFile(filepath.Join(dir, "manifest.json"), man.JSON(), 0o640); err != nil {
 			return "", err
 		}
+		r.chownArtifacts(o, dir)
 		rep.ArtifactsDir = dir
 		return fmt.Sprintf("%d файла в %s", len(files), dir), nil
 	})
@@ -382,6 +383,7 @@ func Repair(o Options, statePath string) (*Report, error) {
 		if err := os.WriteFile(filepath.Join(dir, "manifest.json"), man.JSON(), 0o640); err != nil {
 			return "", err
 		}
+		r.chownArtifacts(o, dir)
 		rep.ArtifactsDir = dir
 		return fmt.Sprintf("%d файла в %s", len(files), dir), nil
 	})
@@ -891,6 +893,14 @@ func (r *runner) grantPanelAccess(o Options) (string, error) {
 			_ = os.Chmod(d, 0o750)
 		}
 	}
+	// уже отрендеренные узлы: их каталоги создал root, панель должна их писать
+	if entries, err := os.ReadDir(filepath.Join(o.StateDir, "out")); err == nil {
+		for _, e := range entries {
+			if e.IsDir() {
+				r.chownArtifacts(o, filepath.Join(o.StateDir, "out", e.Name()))
+			}
+		}
+	}
 	// сертификаты: каталоги — группе, ключи — 0640, цепочки — 0644
 	tlsDir := filepath.Join(o.EtcDir, "tls")
 	_ = filepath.Walk(tlsDir, func(path string, info os.FileInfo, err error) error {
@@ -919,6 +929,39 @@ func (r *runner) grantPanelAccess(o Options) (string, error) {
 		_ = os.Chmod(f, 0o640)
 	}
 	return fmt.Sprintf("%s: %s, %s", o.PanelUser, o.EtcDir, o.StateDir), nil
+}
+
+// chownArtifacts отдаёт каталог артефактов непривилегированной панели.
+// Установщик работает от root, и без этого `/var/lib/revhub/out/<узел>`
+// остаётся root:root — панель не может записать туда `.render-*` и падает с
+// «permission denied» при первом же сохранении.
+func (r *runner) chownArtifacts(o Options, dir string) {
+	if r.dry || dir == "" || o.PanelUser == "" || o.PanelUser == "root" || os.Geteuid() != 0 {
+		return
+	}
+	uid, gid, ok := panelIDs(o.PanelUser)
+	if !ok {
+		return
+	}
+	chownTree(dir, uid, gid, os.Chown)
+}
+
+// chownTree отдаёт каталог артефактов панели: сам каталог, его родитель (там
+// панель создаёт узлы) и все файлы. Права каталогов — 0750, чтобы чужой не читал
+// конфиги, но панель могла писать.
+func chownTree(dir string, uid, gid int, chown func(string, int, int) error) {
+	// родительские каталоги до out включительно: панель создаёт там новые узлы
+	_ = chown(filepath.Dir(dir), uid, gid)
+	_ = os.Chmod(filepath.Dir(dir), 0o750)
+	_ = chown(dir, uid, gid)
+	_ = os.Chmod(dir, 0o750)
+	_ = filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+		if err != nil || info == nil || info.IsDir() {
+			return nil
+		}
+		_ = chown(path, uid, gid)
+		return nil
+	})
 }
 
 // grantApplyLocal разрешает панели применить конфиг через собственный бинарь:

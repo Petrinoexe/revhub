@@ -3,7 +3,9 @@
 package provision
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"net"
 	"os"
 	"os/exec"
@@ -307,7 +309,16 @@ func (s *Service) Run(req Request) (*Report, error) {
 	dir := filepath.Join(s.OutDir, hub.ID)
 	man, err := gen.WriteArtifacts(dir, hubFiles)
 	if err != nil {
-		return rep, err
+		if !errors.Is(err, fs.ErrPermission) {
+			return rep, err
+		}
+		// Каталог артефактов создал установщик от root. Узел уже добавлен и
+		// установлен — валить всю операцию из-за прав на диагностический каталог
+		// нельзя, но и молчать нельзя.
+		rep.Steps = append(rep.Steps, "каталог артефактов хаба недоступен панели ("+err.Error()+
+			"): выполни `sudo revhub repair`; конфиг применит сама панель")
+		req.ApplyLocal = false
+		return rep, nil
 	}
 	man.Node = hub.ID
 	_ = os.WriteFile(filepath.Join(dir, "manifest.json"), man.JSON(), 0o640)
