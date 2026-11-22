@@ -90,19 +90,25 @@ ask() {
 }
 
 REINSTALL=0
+UPDATE=0
 if [ -f "$ETCDIR/state.json" ] || [ -f "$ETCDIR/credentials.json" ] || [ -f "$ETCDIR/revhub.service" ]; then
   TOTAL=5
   sec "панель уже установлена"
   say "  найдено: $ETCDIR"
-  warn "полная переустановка стирает узлы, туннели, клиентов и все пароли"
-  say "  бэкап состояния останется в $ETCDIR/backup-<дата>"
-  ANS="$(ask 'Переустановить с нуля? (y/N)' 'n')"
+  say "  1) обновить бинарь без изменения настроек"
+  say "  2) полная переустановка (узлы и пароли будут удалены)"
+  say "  3) отмена"
+  ANS="$(ask 'Выбор' '1')"
   case "$ANS" in
-    y|Y|yes|Yes) REINSTALL=1; ok "переустановка: всё будет создано заново";;
-    *) die "переустановка отменена; существующие настройки не изменены";;
+    1) UPDATE=1; ok "обновление без изменения настроек";;
+    2) warn "полная переустановка стирает узлы, туннели, клиентов и все пароли"
+       ANS="$(ask 'Подтвердить переустановку с нуля? (y/N)' 'n')"
+       case "$ANS" in y|Y|yes|Yes) REINSTALL=1;; *) die "переустановка отменена";; esac;;
+    *) die "отменено; настройки не изменены";;
   esac
 fi
 
+if [ "$UPDATE" = 0 ]; then
 sec "адрес машины"
 detect_ip() {
   local url ip
@@ -169,6 +175,7 @@ say "  состояние: $ETCDIR/state.json, артефакты: $STATEDIR/out
 say "  панель ставится пустой: узлы, инбаунды, туннели и клиентов добавишь в UI"
 CONFIRM="$(ask 'Ставим? (y/n)' 'y')"
 [ "$CONFIRM" = "y" ] || die "отменено"
+fi
 
 # ------------------------------------------------------------------ зависимости
 
@@ -272,6 +279,40 @@ fi
 
 chmod 755 "$TMP/revhub"
 ok "новый бинарь собран; установка после резервного копирования"
+
+if [ "$UPDATE" = 1 ]; then
+  MANAGE_SERVICE=1
+  if [ "$SANDBOX" = 1 ] && [ "${REVHUB_TEST_SYSTEMCTL:-0}" != 1 ]; then MANAGE_SERVICE=0; fi
+  [ -x "$BIN" ] || die "не найден текущий исполняемый бинарь $BIN"
+  "$TMP/revhub" version >/dev/null || die "новый бинарь не запускается"
+  if [ "$MANAGE_SERVICE" = 1 ]; then
+    systemctl is-active --quiet revhub || die "служба revhub не активна; обновление отменено"
+  fi
+  BACKUP="$(mktemp -d "$ETCDIR/update-backup-XXXXXX")" || die "не удалось создать резервную копию"
+  chmod 700 "$BACKUP"
+  cp -p "$BIN" "$BACKUP/revhub" || die "не удалось сохранить старый бинарь"
+  tar -C "$ETCDIR" --exclude='./backup-*' --exclude='./update-backup-*' -cf "$BACKUP/config.tar" . || die "не удалось сохранить настройки"
+  if [ -f "$UNITDIR/revhub.service" ]; then cp -p "$UNITDIR/revhub.service" "$BACKUP/revhub.service" || die "не удалось сохранить unit"; fi
+  NEWBIN="$(mktemp "$PREFIX/bin/.revhub-update-XXXXXX")" || die "не удалось подготовить бинарь"
+  if ! install -m 755 "$TMP/revhub" "$NEWBIN" || ! mv -f "$NEWBIN" "$BIN"; then
+    rm -f "$NEWBIN"
+    die "не удалось заменить бинарь; старый бинарь сохранён: $BACKUP/revhub"
+  fi
+  if [ "$MANAGE_SERVICE" = 1 ]; then
+    if ! systemctl restart revhub || ! sleep 4 || ! systemctl is-active --quiet revhub; then
+      warn "новая версия не запустилась; восстанавливаю старый бинарь"
+      ROLLBIN="$(mktemp "$PREFIX/bin/.revhub-rollback-XXXXXX")" || die "ошибка отката; бинарь: $BACKUP/revhub"
+      if ! cp -p "$BACKUP/revhub" "$ROLLBIN" || ! mv -f "$ROLLBIN" "$BIN"; then
+        die "ошибка восстановления бинаря; копия: $BACKUP/revhub"
+      fi
+      systemctl restart revhub && systemctl is-active --quiet revhub || die "старый бинарь восстановлен, но сервис не запустился: $BACKUP/revhub"
+      die "обновление не удалось; старый бинарь восстановлен"
+    fi
+  fi
+  ok "панель обновлена; настройки не изменялись"
+  say "  прежний бинарь: $BACKUP/revhub"
+  exit 0
+fi
 
 # ------------------------------------------------------------------ настройка
 
