@@ -171,6 +171,50 @@ func TestArtifactsSet(t *testing.T) {
 	}
 }
 
+// zeroKey — валидный по форме ключ WireGuard (32 байта в base64).
+const zeroKey = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+
+// Узел, который выпускает трафик туннеля, обязан получить и wg-quick@ для
+// автоподъёма, и постоянный (не только на время работы) ip_forward.
+func TestApplyScriptKeepsTunnelAndForwardingAfterReboot(t *testing.T) {
+	var st model.State
+	st.Nodes = []model.Node{{ID: "hub"}, {ID: "exit"}}
+	st.Tunnels = []model.Tunnel{{ID: "tn", Name: "eu", Kind: model.TunnelWGReverse,
+		FromNode: "hub", ToNode: "exit", Enabled: true, Subnet: "10.77.3.0/30",
+		ListenPort: 51820, ForwardPolicy: true,
+		FromKeyPriv: zeroKey, FromKeyPub: zeroKey, ToKeyPriv: zeroKey, ToKeyPub: zeroKey}}
+
+	files, err := Artifacts(st, "exit")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var script string
+	for _, f := range files {
+		if f.Name == "apply.sh" {
+			script = f.Content
+		}
+	}
+	for _, want := range []string{
+		`systemctl enable "wg-quick@wg-eu.service"`,
+		"/etc/sysctl.d/90-revhub.conf",
+		"net.ipv4.ip_forward=1",
+	} {
+		if !strings.Contains(script, want) {
+			t.Errorf("в apply.sh нет %q", want)
+		}
+	}
+	// На стороне, которая только отправляет, forwarding не нужен.
+	files, err = Artifacts(st, "hub")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range files {
+		if f.Name == "apply.sh" && strings.Contains(f.Content, "90-revhub.conf") {
+			t.Error("хаб не должен включать ip_forward")
+		}
+	}
+}
+
 // Порты для firewall: клиентские инбаунды и слушатели туннелей, без дублей.
 func TestNodePortsCoversInboundsAndListeners(t *testing.T) {
 	var st model.State
@@ -196,14 +240,14 @@ func TestNodePortsCoversInboundsAndListeners(t *testing.T) {
 
 // apply.sh открывает порты сам: свежий VPS с ufw иначе «не пускает» клиентов.
 func TestApplyScriptOpensPorts(t *testing.T) {
-	s := applyScript(nil, false, []string{"443/tcp", "51820/udp"})
+	s := applyScript(nil, false, []string{"443/tcp", "51820/udp"}, false)
 	for _, want := range []string{"ufw status", `ufw allow "443/tcp"`, `ufw allow "51820/udp"`, "firewall-cmd --permanent --add-port"} {
 		if !strings.Contains(s, want) {
 			t.Errorf("в apply.sh нет %q", want)
 		}
 	}
 	// без портов — никаких обращений к firewall
-	if s := applyScript(nil, false, nil); strings.Contains(s, "ufw") {
+	if s := applyScript(nil, false, nil, false); strings.Contains(s, "ufw") {
 		t.Error("ufw вызывается без портов")
 	}
 }
@@ -216,7 +260,7 @@ func TestApplyRestoresXrayConfigOnFailedRestart(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	write("apply.sh", applyScript(nil, true, []string{"443/tcp"}), 0o700)
+	write("apply.sh", applyScript(nil, true, []string{"443/tcp"}, false), 0o700)
 	write("xray.json", "new", 0o600)
 	write("running.json", "old", 0o600)
 	write("systemctl", "#!/bin/sh\n[ \"$*\" = 'restart xray' ] && [ \"$(cat \"$XRAY_CONFIG\")\" = old ]\n", 0o700)

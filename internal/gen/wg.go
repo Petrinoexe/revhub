@@ -65,9 +65,19 @@ func Artifacts(st model.State, nodeID string) ([]File, error) {
 	}
 	sort.Strings(wgNames)
 	useXray := len(wgNames) == 0 || NeedsXray(st, nodeID)
+	// Узел выпускает трафик туннеля в интернет — значит, ему нужен ip_forward
+	// не только до перезагрузки: PostUp wg-quick выставляет его в рантайме, но
+	// systemd-sysctl при загрузке может вернуть 0, и туннель «поднят, но не водит».
+	forward := false
+	for _, t := range st.Tunnels {
+		if t.Enabled && t.ToNode == nodeID && t.ForwardPolicy &&
+			(t.Kind == model.TunnelWG || t.Kind == model.TunnelWGReverse) {
+			forward = true
+		}
+	}
 
 	files = append(files,
-		File{Name: "apply.sh", Content: applyScript(wgNames, useXray, NodePorts(st, nodeID)), Mode: 0o700},
+		File{Name: "apply.sh", Content: applyScript(wgNames, useXray, NodePorts(st, nodeID), forward), Mode: 0o700},
 		File{Name: "rollback.sh", Content: rollbackScript(wgNames, useXray), Mode: 0o700},
 	)
 	return files, nil
@@ -273,7 +283,7 @@ func pick(cond bool, a, b string) string {
 	return b
 }
 
-func applyScript(wgFiles []string, useXray bool, ports []string) string {
+func applyScript(wgFiles []string, useXray bool, ports []string, forward bool) string {
 	var b strings.Builder
 	b.WriteString("#!/usr/bin/env bash\n")
 	b.WriteString("# Сгенерировано revhub. Порядок важен: сначала туннели, потом ядро.\n")
@@ -307,6 +317,18 @@ STATE_DIR=${STATE_DIR:-/etc/revhub}
 		name := strings.TrimSuffix(f, ".conf")
 		fmt.Fprintf(&b, "if ! cmp -s %q /etc/wireguard/%q || ! ip link show dev %q >/dev/null 2>&1; then\n  if ip link show dev %q >/dev/null 2>&1; then wg-quick down %q; fi\n  install -m 600 %q /etc/wireguard/%q\n  wg-quick up %q\nfi\n",
 			f, f, name, name, name, f, f, name)
+		// Интерфейс должен подниматься после перезагрузки: apply.sh запускается
+		// один раз, а systemd поднимет wg-quick@<имя> сам.
+		fmt.Fprintf(&b, "if [ -d /run/systemd/system ]; then systemctl enable %q >/dev/null 2>&1 || true; fi\n",
+			"wg-quick@"+name+".service")
+	}
+	if forward {
+		// Рантайм-настройка PostUp живёт до перезагрузки; drop-in оставляет её
+		// навсегда, иначе «туннель поднят, но не водит трафик» после ребута.
+		b.WriteString(`install -d -m 755 /etc/sysctl.d
+printf '%s\n' 'net.ipv4.ip_forward=1' > /etc/sysctl.d/90-revhub.conf
+sysctl -q -p /etc/sysctl.d/90-revhub.conf 2>/dev/null || sysctl -q -w net.ipv4.ip_forward=1
+`)
 	}
 	if !useXray {
 		return b.String()
