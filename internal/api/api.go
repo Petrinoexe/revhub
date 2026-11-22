@@ -29,14 +29,17 @@ import (
 var uiFS embed.FS
 
 type Server struct {
-	Store   *store.Store
-	OutDir  string
-	Auth    *auth.Credentials // nil только при --noauth
-	Limiter *auth.Limiter
-	NoAuth  bool
-	Secrets *secrets.Store
-	Prov    *provision.Service
-	Mon     *monitor.Monitor
+	Store     *store.Store
+	OutDir    string
+	Auth      *auth.Credentials // nil только при --noauth
+	Limiter   *auth.Limiter
+	NoAuth    bool
+	Secrets   *secrets.Store
+	Prov      *provision.Service
+	Mon       *monitor.Monitor
+	LocalNode string
+	TLSCert   string
+	TLSKey    string
 }
 
 func (s *Server) Handler() http.Handler {
@@ -153,11 +156,11 @@ func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) me(w http.ResponseWriter, r *http.Request) {
-	if s.Auth == nil {
-		writeJSON(w, http.StatusOK, map[string]any{"user": "", "noauth": true})
-		return
+	user := ""
+	if s.Auth != nil {
+		user = s.Auth.User
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"user": s.Auth.User})
+	writeJSON(w, http.StatusOK, map[string]any{"user": user, "noauth": s.NoAuth, "local_node": s.LocalNode, "panel_tls": s.hasPanelTLS()})
 }
 
 func clientIP(r *http.Request) string {
@@ -177,6 +180,10 @@ func (s *Server) putState(w http.ResponseWriter, r *http.Request) {
 	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4<<20))
 	if err := dec.Decode(&st); err != nil {
 		writeErr(w, http.StatusBadRequest, "не разобрал JSON: "+err.Error())
+		return
+	}
+	if err := s.bindPanelTLS(&st); err != nil {
+		writeErr(w, http.StatusUnprocessableEntity, err.Error())
 		return
 	}
 	if err := s.Store.Replace(st); err != nil {
@@ -238,7 +245,11 @@ func (s *Server) render(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusUnprocessableEntity, err.Error())
 		return
 	}
-	dir := filepath.Join(s.OutDir, req.Node)
+	dir, err := filepath.Abs(filepath.Join(s.OutDir, req.Node))
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	man, err := gen.WriteArtifacts(dir, files)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
@@ -258,7 +269,7 @@ func (s *Server) render(w http.ResponseWriter, r *http.Request) {
 	for _, f := range files {
 		items = append(items, item{Name: f.Name, Size: len(f.Content), SHA: man.Files[f.Name]})
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"dir": dir, "files": items})
+	writeJSON(w, http.StatusOK, map[string]any{"dir": dir, "files": items, "local": req.Node == s.LocalNode})
 }
 
 func (s *Server) routeCheck(w http.ResponseWriter, r *http.Request) {

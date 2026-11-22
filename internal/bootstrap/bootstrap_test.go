@@ -60,6 +60,9 @@ func (f *fakeRunner) Run(cmd string) (string, error) {
 	case strings.Contains(cmd, "apt-get install"):
 		return "", nil
 	case strings.Contains(cmd, "bash apply.sh"):
+		if strings.Contains(cmd, "| tail") {
+			return "", fmt.Errorf("apply exit status masked by pipeline")
+		}
 		return "применено", nil
 	case strings.HasPrefix(cmd, "systemctl is-active xray"):
 		return "active", nil

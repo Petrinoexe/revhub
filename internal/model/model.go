@@ -5,6 +5,7 @@ package model
 import (
 	"crypto/ecdh"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"fmt"
@@ -95,6 +96,7 @@ type Inbound struct {
 	CertFile   string            `json:"cert_file"`
 	KeyFile    string            `json:"key_file"`
 	SelfSigned bool              `json:"self_signed"`
+	CertSHA256 string            `json:"cert_sha256,omitempty"` // SHA-256 of a self-signed panel certificate
 	Enabled    bool              `json:"enabled"`
 	WireGuard  *WireGuardInbound `json:"wireguard,omitempty"`
 }
@@ -159,6 +161,22 @@ func (c Client) Expired() bool {
 	}
 	t, err := time.Parse(time.RFC3339, c.ExpiresAt)
 	return err != nil || !time.Now().Before(t)
+}
+
+// EffectiveFlow restricts Vision to VLESS over TCP with TLS or REALITY.
+func EffectiveFlow(flow, transport, security string) string {
+	if flow == "xtls-rprx-vision" && (transport == "" || transport == "tcp") && (security == "tls" || security == "reality") {
+		return flow
+	}
+	return ""
+}
+
+func (in Inbound) ClientFlow(c Client) string {
+	flow := c.Flow
+	if flow == "" {
+		flow = in.Flow
+	}
+	return EffectiveFlow(flow, in.Transport, in.Security)
 }
 
 type Rule struct {
@@ -284,6 +302,18 @@ func (s State) NextMark() int {
 
 func (t Tunnel) Tag() string { return TagTunnel + t.Name }
 
+// WGInterface preserves valid legacy interface names and shortens long ones.
+func (t Tunnel) WGInterface() string {
+	name := "wg-" + t.Name
+	if len(name) <= 15 && strings.IndexFunc(name, func(c rune) bool {
+		return !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || strings.ContainsRune("_=+.-", c))
+	}) == -1 {
+		return name
+	}
+	sum := sha256.Sum256([]byte(t.ID + "/" + t.Name))
+	return fmt.Sprintf("wg-%x", sum[:6])
+}
+
 // ListenerNode — узел, который держит ListenPort; DialerNode — тот, кто
 // дозванивается. Направление трафика всегда From → To.
 func (t Tunnel) ListenerNode() string {
@@ -381,9 +411,7 @@ func (s *State) Normalize() {
 		if t.ListenPort == 0 {
 			t.ListenPort = 51820
 		}
-		if t.EgressIface == "" {
-			t.EgressIface = "ens3"
-		}
+
 		if t.Kind == TunnelVLESS {
 			if t.Transport == "" {
 				t.Transport = "tcp"
@@ -437,6 +465,21 @@ func (s State) ValidTags(nodeID string) map[string]bool {
 		}
 	}
 	return m
+}
+
+// HasInboundTag учитывает обычные инбаунды и принимающую сторону VLESS-туннеля.
+func (s State) HasInboundTag(nodeID, tag string) bool {
+	for _, in := range s.Inbounds {
+		if in.NodeID == nodeID && in.Tag == tag {
+			return true
+		}
+	}
+	for _, tunnel := range s.Tunnels {
+		if tunnel.Kind == TunnelVLESS && tunnel.ToNode == nodeID && tunnel.Tag() == tag {
+			return true
+		}
+	}
+	return false
 }
 
 // Validate проверяет инварианты из docs/DATA-MODEL.md.
@@ -501,7 +544,11 @@ func (s State) Validate() error {
 				add("инбаунд %s: для reality нужны private_key, short_id, dest, sni", in.Tag)
 			}
 		}
-		if err := validateTLS("инбаунд "+in.Tag, in.Security, in.CertSource, in.Domain, in.IP, in.CertFile, in.KeyFile); err != nil {
+		source := in.CertSource
+		if source == "panel" {
+			source = "file" // API resolves the configured local certificate and key paths.
+		}
+		if err := validateTLS("инбаунд "+in.Tag, in.Security, source, in.Domain, in.IP, in.CertFile, in.KeyFile); err != nil {
 			add("%v", err)
 		}
 		if in.Transport == "ws" || in.Transport == "xhttp" {
@@ -604,6 +651,20 @@ func (s State) Validate() error {
 			}
 		} else if !s.ValidTags(r.NodeID)[r.Outbound] {
 			add("правило #%d %s: на узле %s нет исходящего %q", i+1, r.Name, r.NodeID, r.Outbound)
+		}
+		if r.Enabled {
+			for _, tag := range r.Inbound {
+				found := false
+				for nodeID := range nodes {
+					if (r.NodeID == "" || r.NodeID == nodeID) && s.ValidTags(nodeID)[r.Outbound] && s.HasInboundTag(nodeID, tag) {
+						found = true
+						break
+					}
+				}
+				if !found {
+					add("правило #%d %s: инбаунд %q и исходящий %q должны быть на одном узле", i+1, r.Name, tag, r.Outbound)
+				}
+			}
 		}
 		for _, u := range r.User {
 			found := false

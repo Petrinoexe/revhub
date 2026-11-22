@@ -2,6 +2,9 @@ package gen
 
 import (
 	"encoding/json"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -98,6 +101,7 @@ func TestWGReverseSides(t *testing.T) {
 		"PostUp = ip -4 route replace 10.77.1.2/32 dev %i", // маршрут для SSH через туннель
 		"PostUp = ip rule add fwmark 100 lookup 100",
 		"ip -4 route replace default dev %i table 100",
+		"/proc/sys/net/ipv4/conf/%i/rp_filter",
 		"AllowedIPs = 0.0.0.0/0",
 	} {
 		if !strings.Contains(hubConf, want) {
@@ -125,6 +129,10 @@ func TestWGReverseSides(t *testing.T) {
 	}
 	if strings.Contains(exitConf, "ip rule add fwmark") {
 		t.Error("выходной не должен ставить метки: он не источник трафика")
+	}
+	peerSection := strings.SplitN(exitConf, "[Peer]\n", 2)
+	if len(peerSection) != 2 || !strings.Contains(peerSection[1], "PersistentKeepalive = 25\n") || strings.Contains(peerSection[0], "PersistentKeepalive") {
+		t.Fatal("PersistentKeepalive must be in [Peer], where wg-quick expects it")
 	}
 }
 
@@ -160,6 +168,53 @@ func TestArtifactsSet(t *testing.T) {
 		if !names[want] {
 			t.Errorf("нет артефакта %s", want)
 		}
+	}
+}
+
+func TestApplyRestoresXrayConfigOnFailedRestart(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name, content string, mode os.FileMode) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(content), mode); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("apply.sh", applyScript(nil, true), 0o700)
+	write("xray.json", "new", 0o600)
+	write("running.json", "old", 0o600)
+	write("systemctl", "#!/bin/sh\n[ \"$*\" = 'restart xray' ] && [ \"$(cat \"$XRAY_CONFIG\")\" = old ]\n", 0o700)
+	config := filepath.Join(dir, "running.json")
+	cmd := exec.Command("bash", filepath.Join(dir, "apply.sh"))
+	cmd.Env = append(os.Environ(), "PATH="+dir+":"+os.Getenv("PATH"), "XRAY_BIN=true", "XRAY_CONFIG="+config, "STATE_DIR="+dir)
+	if out, err := cmd.CombinedOutput(); err == nil || !strings.Contains(string(out), "Xray не запустился") {
+		t.Fatalf("expected apply to report restart failure, got %v: %s", err, out)
+	}
+	if got, err := os.ReadFile(config); err != nil || string(got) != "old" {
+		t.Fatalf("previous Xray config was not restored: %v", err)
+	}
+}
+
+func TestWGExitArtifactsDoNotRequireXray(t *testing.T) {
+	st := model.Demo()
+	st.Tunnels[0].Name = "to-some-long-host-example"
+	files, err := Artifacts(st, "exit-eu")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var iface, script string
+	for _, f := range files {
+		if strings.HasSuffix(f.Name, ".conf") {
+			iface = strings.TrimSuffix(f.Name, ".conf")
+		}
+		if f.Name == "apply.sh" {
+			script = f.Content
+		}
+	}
+	if iface == "" || len(iface) > 15 {
+		t.Fatalf("invalid WG interface name: %q", iface)
+	}
+	if !strings.Contains(script, "wg-quick up") || strings.Contains(script, "systemctl restart") {
+		t.Fatal("a WG-only exit must only apply WireGuard")
 	}
 }
 

@@ -32,6 +32,9 @@ func Links(st model.State, c model.Client) []string {
 		host, port := hostPort(node.PublicAddr, in.Port)
 		switch in.Kind {
 		case model.InboundVLESS, "":
+			if in.Security == "tls" && in.CertSource == "panel" {
+				port = in.Port
+			}
 			out = append(out, vlessLink(in, node, host, port, c, st))
 		case model.InboundWireGuard:
 			// Порт узла может быть портом панели или TCP-инбаунда.
@@ -75,7 +78,9 @@ func vlessLink(in model.Inbound, node model.Node, host string, port int, c model
 		q.Set("fp", "chrome")
 		// Самоподписанный сертификат не проверить по цепочке: клиенту либо
 		// allowInsecure, либо пин (его печатает `revhub tls info`).
-		if in.SelfSigned {
+		if in.CertSource == "panel" && in.CertSHA256 != "" {
+			q.Set("pcs", in.CertSHA256)
+		} else if in.SelfSigned {
 			q.Set("allowInsecure", "1")
 		}
 	}
@@ -90,7 +95,7 @@ func vlessLink(in model.Inbound, node model.Node, host string, port int, c model
 	if in.Transport == "ws" || in.Transport == "xhttp" {
 		q.Set("host", orDefault(in.SNI, host))
 	}
-	if flow := clientFlow(in, c); flow != "" {
+	if flow := in.ClientFlow(c); flow != "" {
 		q.Set("flow", flow)
 	}
 	name := c.Email + "@" + in.Tag
@@ -98,13 +103,6 @@ func vlessLink(in model.Inbound, node model.Node, host string, port int, c model
 		name += " (" + node.Name + ")"
 	}
 	return fmt.Sprintf("vless://%s@%s?%s#%s", c.UUID, net.JoinHostPort(host, strconv.Itoa(port)), q.Encode(), url.PathEscape(name))
-}
-
-func clientFlow(in model.Inbound, c model.Client) string {
-	if c.Flow != "" {
-		return c.Flow
-	}
-	return in.Flow
 }
 
 func hostPort(publicAddr string, fallbackPort int) (string, int) {

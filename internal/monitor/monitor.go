@@ -23,12 +23,12 @@ type Monitor struct {
 }
 
 type Status struct {
-	NodeID   string `json:"node_id"`
-	Status   string `json:"status"`
-	Addr     string `json:"addr"`
-	Via      string `json:"via"`
-	Latency  int    `json:"latency_ms"`
-	Handshake int   `json:"handshake_age"`
+	NodeID    string `json:"node_id"`
+	Status    string `json:"status"`
+	Addr      string `json:"addr"`
+	Via       string `json:"via"`
+	Latency   int    `json:"latency_ms"`
+	Handshake int    `json:"handshake_age"`
 }
 
 // Start запускает цикл проверок. Возвращается сразу; цикл живёт до отмены ctx.
@@ -107,7 +107,7 @@ func (m *Monitor) handshakeAge(st model.State, nodeID string) int {
 			continue
 		}
 		if t.Kind == model.TunnelWG || t.Kind == model.TunnelWGReverse {
-			iface = "wg-" + t.Name
+			iface = t.WGInterface()
 			break
 		}
 	}

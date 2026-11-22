@@ -2,12 +2,15 @@ package gen
 
 import (
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -30,6 +33,9 @@ type Manifest struct {
 
 // Artifacts собирает полный набор файлов для узла.
 func Artifacts(st model.State, nodeID string) ([]File, error) {
+	if !filepath.IsLocal(nodeID) || filepath.Base(nodeID) != nodeID || nodeID == "." {
+		return nil, fmt.Errorf("некорректный id узла %q", nodeID)
+	}
 	if _, ok := findNode(st, nodeID); !ok {
 		return nil, fmt.Errorf("узел %q не найден", nodeID)
 	}
@@ -53,17 +59,33 @@ func Artifacts(st model.State, nodeID string) ([]File, error) {
 		if err != nil {
 			return nil, fmt.Errorf("туннель %s: %w", t.Name, err)
 		}
-		name := "wg-" + t.Name + ".conf"
+		name := t.WGInterface() + ".conf"
 		files = append(files, File{Name: name, Content: conf, Mode: 0o600})
 		wgNames = append(wgNames, name)
 	}
 	sort.Strings(wgNames)
+	useXray := len(wgNames) == 0 || NeedsXray(st, nodeID)
 
 	files = append(files,
-		File{Name: "apply.sh", Content: applyScript(nodeID, wgNames), Mode: 0o700},
-		File{Name: "rollback.sh", Content: rollbackScript(wgNames), Mode: 0o700},
+		File{Name: "apply.sh", Content: applyScript(wgNames, useXray), Mode: 0o700},
+		File{Name: "rollback.sh", Content: rollbackScript(wgNames, useXray), Mode: 0o700},
 	)
 	return files, nil
+}
+
+// NeedsXray identifies nodes with listeners or an Xray tunnel endpoint.
+func NeedsXray(st model.State, nodeID string) bool {
+	for _, in := range st.Inbounds {
+		if in.Enabled && in.NodeID == nodeID {
+			return true
+		}
+	}
+	for _, t := range st.Tunnels {
+		if t.Enabled && (t.FromNode == nodeID || t.Kind == model.TunnelVLESS && t.ToNode == nodeID) {
+			return true
+		}
+	}
+	return false
 }
 
 // WGConfig рендерит wg-quick конфиг для одного конца туннеля.
@@ -86,23 +108,26 @@ func WGConfig(st model.State, t model.Tunnel, nodeID string) (string, error) {
 	if isFrom {
 		addr, otherPub = fromAddr, t.ToKeyPub
 	}
+	private := pick(isFrom, t.FromKeyPriv, t.ToKeyPriv)
+	for _, key := range []string{private, otherPub} {
+		raw, err := base64.StdEncoding.DecodeString(key)
+		if err != nil || len(raw) != 32 || base64.StdEncoding.EncodeToString(raw) != key {
+			return "", fmt.Errorf("некорректный ключ WireGuard на узле %s", nodeID)
+		}
+	}
 
 	var b strings.Builder
 	fmt.Fprintf(&b, "# revhub: туннель %q, вид %s, узел %s\n", t.Name, t.Kind, nodeID)
 	fmt.Fprintf(&b, "# направление трафика: %s → %s\n", t.FromNode, t.ToNode)
 	b.WriteString("[Interface]\n")
 	fmt.Fprintf(&b, "Address = %s/30\n", addr)
-	fmt.Fprintf(&b, "PrivateKey = %s\n", pick(isFrom, t.FromKeyPriv, t.ToKeyPriv))
+	fmt.Fprintf(&b, "PrivateKey = %s\n", private)
 	b.WriteString("Table = off\n")
 	fmt.Fprintf(&b, "MTU = %d\n", 1380)
 
 	if nodeID == listener {
 		fmt.Fprintf(&b, "ListenPort = %d\n", t.ListenPort)
 	}
-	if nodeID != listener {
-		fmt.Fprintf(&b, "PersistentKeepalive = %d\n", t.Keepalive)
-	}
-
 	if isFrom {
 		// Единственная точка стыка двух плоскостей: метка → таблица → интерфейс.
 		// Плюс host-route до дальнего конца в main: по нему панель ходит на
@@ -111,31 +136,32 @@ func WGConfig(st model.State, t model.Tunnel, nodeID string) (string, error) {
 		fmt.Fprintf(&b, "PostDown = ip -4 route del %s/32 dev %%i 2>/dev/null || true\n", toAddr)
 		fmt.Fprintf(&b, "PostUp = ip rule add fwmark %d lookup %d 2>/dev/null || true\n", t.Mark, t.Mark)
 		fmt.Fprintf(&b, "PostUp = ip -4 route replace default dev %%i table %d\n", t.Mark)
+		// Replies arrive on WireGuard, while the unmarked reverse path uses the WAN.
+		b.WriteString("PostUp = printf '2\\n' > /proc/sys/net/ipv4/conf/%i/rp_filter\n")
 		fmt.Fprintf(&b, "PostDown = ip rule del fwmark %d lookup %d 2>/dev/null || true\n", t.Mark, t.Mark)
 		fmt.Fprintf(&b, "PostDown = ip -4 route flush table %d 2>/dev/null || true\n", t.Mark)
 	}
 	if !isFrom && t.ForwardPolicy {
-		fmt.Fprintf(&b, "PostUp = sysctl -q -w net.ipv4.ip_forward=1\n")
-		fmt.Fprintf(&b, "PostUp = (nft add rule ip nat postrouting oifname %q ip saddr %s masquerade 2>/dev/null"+
-			" || iptables -t nat -A POSTROUTING -s %s -o %s -j MASQUERADE) || true\n",
-			t.EgressIface, t.Subnet, t.Subnet, t.EgressIface)
-		fmt.Fprintf(&b, "PostDown = (nft delete rule ip nat postrouting handle $(nft -a list chain ip nat postrouting 2>/dev/null"+
-			" | grep %q | head -1 | sed 's/.*handle //') 2>/dev/null"+
-			" || iptables -t nat -D POSTROUTING -s %s -o %s -j MASQUERADE) || true\n",
-			t.EgressIface, t.Subnet, t.EgressIface)
+		if err := writeNAT(&b, t, fromAddr); err != nil {
+			return "", err
+		}
 	}
 
 	b.WriteString("\n[Peer]\n")
 	fmt.Fprintf(&b, "PublicKey = %s\n", otherPub)
 	if nodeID == dialer {
+		fmt.Fprintf(&b, "PersistentKeepalive = %d\n", t.Keepalive)
 		// Endpoint — адрес слушающей стороны. Порт берём из туннеля, а не из
 		// public_addr узла: там лежит порт для клиентов (443), он тут не годится.
 		host := hostOnly(mustNode(st, listener).PublicAddr)
+		if strings.ContainsAny(host, "\r\n#") {
+			return "", fmt.Errorf("некорректный адрес WireGuard на узле %s", listener)
+		}
 		port := t.ListenPort
 		if t.PublicPort > 0 {
 			port = t.PublicPort
 		}
-		fmt.Fprintf(&b, "Endpoint = %s:%d\n", host, port)
+		fmt.Fprintf(&b, "Endpoint = %s\n", net.JoinHostPort(host, strconv.Itoa(port)))
 	}
 	if isFrom {
 		b.WriteString("AllowedIPs = 0.0.0.0/0\n")
@@ -150,10 +176,37 @@ func mustNode(st model.State, id string) model.Node {
 	return n
 }
 
+func writeNAT(b *strings.Builder, t model.Tunnel, fromAddr string) error {
+	sum := sha256.Sum256([]byte(t.WGInterface()))
+	table := fmt.Sprintf("revhub_%x", sum[:6])
+	selector := `iifname "%i" ip saddr ` + fromAddr + `/32 oifname != "%i"`
+	// iptables POSTROUTING cannot match the input interface.
+	legacy := "-s " + fromAddr + "/32 ! -o %i"
+	if iface := t.EgressIface; iface != "" {
+		if len(iface) > 15 || strings.ContainsFunc(iface, func(c rune) bool {
+			return !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || strings.ContainsRune("_=+.-", c))
+		}) {
+			return fmt.Errorf("некорректное имя выходного интерфейса %q", iface)
+		}
+		fmt.Fprintf(b, "PostUp = ip link show dev %q >/dev/null\n", iface)
+		selector = `iifname "%i" ip saddr ` + fromAddr + "/32 oifname " + strconv.Quote(iface)
+		legacy = "-s " + fromAddr + "/32 -o " + iface
+	}
+	b.WriteString("PostUp = sysctl -q -w net.ipv4.ip_forward=1\n")
+	// Create a separate table so nftables works even on a fresh exit node.
+	fmt.Fprintf(b, "PostUp = if command -v nft >/dev/null; then printf '%%s\\n' 'add table ip %s' 'add chain ip %s postrouting { type nat hook postrouting priority srcnat; }' 'add rule ip %s postrouting %s masquerade' | nft -f -; else iptables -t nat -A POSTROUTING %s -j MASQUERADE; fi\n",
+		table, table, table, selector, legacy)
+	fmt.Fprintf(b, "PostDown = if command -v nft >/dev/null; then nft delete table ip %s; else iptables -t nat -D POSTROUTING %s -j MASQUERADE; fi\n", table, legacy)
+	return nil
+}
+
 // hostOnly отрезает порт от "host:port"; для IPv6 в скобках сохраняет адрес.
 func hostOnly(addr string) string {
 	if addr == "" {
 		return "127.0.0.1"
+	}
+	if net.ParseIP(addr) != nil {
+		return addr
 	}
 	if strings.HasPrefix(addr, "[") {
 		if i := strings.LastIndex(addr, "]"); i > 0 {
@@ -175,47 +228,59 @@ func pick(cond bool, a, b string) string {
 	return b
 }
 
-func applyScript(nodeID string, wgFiles []string) string {
+func applyScript(wgFiles []string, useXray bool) string {
 	var b strings.Builder
 	b.WriteString("#!/usr/bin/env bash\n")
 	b.WriteString("# Сгенерировано revhub. Порядок важен: сначала туннели, потом ядро.\n")
 	b.WriteString("set -euo pipefail\ncd \"$(dirname \"$0\")\"\n")
-	fmt.Fprintf(&b, "NODE=%q\n", nodeID)
-	b.WriteString(`XRAY_BIN=${XRAY_BIN:-xray}
+	if useXray {
+		b.WriteString(`XRAY_BIN=${XRAY_BIN:-xray}
 XRAY_CONFIG=${XRAY_CONFIG:-/usr/local/etc/xray/config.json}
 STATE_DIR=${STATE_DIR:-/etc/revhub}
-
-echo "[revhub] узел $NODE"
-
-# 1. WireGuard: снять старое, поднять новое (PostUp делает правила и маршруты)
+"$XRAY_BIN" -test -c xray.json
 `)
+	}
+	if len(wgFiles) > 0 {
+		b.WriteString("install -d -m 700 /etc/wireguard\n")
+	}
 	for _, f := range wgFiles {
 		name := strings.TrimSuffix(f, ".conf")
-		fmt.Fprintf(&b, "if [ -f %q ]; then wg-quick down %q 2>/dev/null || true; install -m 600 %q /etc/wireguard/%q; wg-quick up %q; fi\n",
-			f, name, f, f, name)
+		fmt.Fprintf(&b, "if ! cmp -s %q /etc/wireguard/%q || ! ip link show dev %q >/dev/null 2>&1; then\n  if ip link show dev %q >/dev/null 2>&1; then wg-quick down %q; fi\n  install -m 600 %q /etc/wireguard/%q\n  wg-quick up %q\nfi\n",
+			f, f, name, name, name, f, f, name)
+	}
+	if !useXray {
+		return b.String()
 	}
 	b.WriteString(`
-# 2. Ядро: проверка конфига ДО установки, иначе узел ляжет
-"$XRAY_BIN" -test -c xray.json
-
-# 3. Сохранить предыдущий рабочий конфиг и применить
+install -d "$(dirname "$XRAY_CONFIG")"
 install -d -m 750 "$STATE_DIR/last-good"
+had_config=0
 if [ -f "$XRAY_CONFIG" ]; then
   cp -a "$XRAY_CONFIG" "$STATE_DIR/last-good/xray.json"
+  had_config=1
 fi
-install -m 640 xray.json "$XRAY_CONFIG"
-systemctl restart "${XRAY_BIN%% *}" 2>/dev/null || true
-sleep 1
-systemctl is-active --quiet "$(basename "$XRAY_BIN")" 2>/dev/null ||
-  systemctl is-active --quiet xray ||
-  echo "[revhub] внимание: юнит ядра не подтвердил active — проверь journalctl -u xray"
+candidate=$(mktemp "${XRAY_CONFIG}.revhub.XXXXXX")
+trap 'rm -f -- "$candidate"' EXIT
+install -m 640 xray.json "$candidate"
+mv -fT -- "$candidate" "$XRAY_CONFIG"
+if ! systemctl restart xray || ! sleep 1 || ! systemctl is-active --quiet xray; then
+  echo "[revhub] Xray не запустился. Проверь journalctl -u xray" >&2
+  if [ "$had_config" = 1 ]; then
+    cp -a "$STATE_DIR/last-good/xray.json" "$candidate"
+    mv -fT -- "$candidate" "$XRAY_CONFIG"
+    systemctl restart xray
+  else
+    rm -f -- "$XRAY_CONFIG"
+  fi
+  exit 1
+fi
 
 echo "[revhub] применено. откат: ./rollback.sh"
 `)
 	return b.String()
 }
 
-func rollbackScript(wgFiles []string) string {
+func rollbackScript(wgFiles []string, useXray bool) string {
 	var b strings.Builder
 	b.WriteString("#!/usr/bin/env bash\nset -euo pipefail\ncd \"$(dirname \"$0\")\"\n")
 	b.WriteString("XRAY_CONFIG=${XRAY_CONFIG:-/usr/local/etc/xray/config.json}\n")
@@ -223,6 +288,9 @@ func rollbackScript(wgFiles []string) string {
 	for _, f := range wgFiles {
 		name := strings.TrimSuffix(f, ".conf")
 		fmt.Fprintf(&b, "wg-quick down %q 2>/dev/null || true\n", name)
+	}
+	if !useXray {
+		return b.String()
 	}
 	b.WriteString(`
 if [ -f "$STATE_DIR/last-good/xray.json" ]; then

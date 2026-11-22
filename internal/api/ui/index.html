@@ -80,19 +80,19 @@ const SCHEMA = {
     {k:'ssh_key_file', l:'SSH ключ (путь на панели)', grp:'ssh', wide:true}
   ],
   inbounds: [
-    {k:'id', l:'id'}, {k:'node_id', l:'Узел', ref:'nodes'}, {k:'tag', l:'tag'},
+    {k:'id', l:'id'}, {k:'node_id', l:'Где слушает инбаунд', ref:'nodes'}, {k:'tag', l:'Тег инбаунда'},
     {k:'name', l:'Имя'}, {k:'enabled', l:'вкл', bool:true},
     {k:'kind', l:'Протокол', sel:['vless','wireguard'], labels:{vless:'VLESS',wireguard:'WireGuard'}},
     {k:'listen', l:'listen'}, {k:'port', l:'порт', num:true},
     {k:'transport', l:'транспорт', sel:['tcp','ws','xhttp']},
     {k:'security', l:'security', sel:['reality','tls','none']},
-    {k:'flow', l:'flow'}, {k:'sni', l:'SNI / dest-домен', only:'reality'}, {k:'dest', l:'dest (host:port)', only:'reality'},
+    {k:'flow', l:'Flow', sel:['','none','xtls-rprx-vision'], labels:{'':'Авто',none:'Без Flow','xtls-rprx-vision':'Vision'}}, {k:'sni', l:'SNI / dest-домен', only:'reality'}, {k:'dest', l:'dest (host:port)', only:'reality'},
     {k:'path', l:'path'},
-    {k:'cert_source', l:'сертификат', sel:['acme','acmeip','selfsigned','file'], only:'tls'},
-    {k:'domain', l:'домен (для acme и SNI)', only:'tls'},
-    {k:'ip', l:'IP (для acmeip и selfsigned)', only:'tls'},
-    {k:'cert_file', l:'cert_file (для file)', only:'tls'},
-    {k:'key_file', l:'key_file (для file)', only:'tls'},
+    {k:'cert_source', l:'Сертификат', sel:['panel','acme','acmeip','selfsigned','file'], labels:{panel:'Сертификат панели',acme:'Let’s Encrypt · домен',acmeip:'Let’s Encrypt · IP',selfsigned:'Самоподписанный',file:'Свои файлы'}, only:'tls'},
+    {k:'domain', l:'Домен (для ACME и SNI)', only:'tls', sources:['acme','selfsigned','file']},
+    {k:'ip', l:'IP сертификата', only:'tls', sources:['acmeip','selfsigned','file']},
+    {k:'cert_file', l:'Путь к сертификату', only:'tls', sources:['file']},
+    {k:'key_file', l:'Путь к ключу', only:'tls', sources:['file']},
     {k:'private_key', l:'reality private_key', wide:true, only:'reality'},
     {k:'public_key', l:'reality public_key', wide:true, only:'reality'},
     {k:'short_id', l:'reality short_id', only:'reality'}
@@ -105,27 +105,27 @@ const SCHEMA = {
     {k:'enabled', l:'вкл', bool:true}, {k:'mark', l:'mark', num:true},
     {k:'subnet', l:'Подсеть'}, {k:'listen_port', l:'ListenPort', num:true},
     {k:'public_port', l:'PublicPort (если NAT)', num:true}, {k:'keepalive', l:'Keepalive', num:true},
-    {k:'egress_iface', l:'Egress iface (на to)'}, {k:'forward_policy', l:'NAT на to', bool:true},
+    {k:'egress_iface', l:'Выходной интерфейс (пусто = авто)'}, {k:'forward_policy', l:'NAT на выходном узле', bool:true},
     {k:'from_key_private', l:'from priv', wide:true}, {k:'from_key_public', l:'from pub', wide:true},
     {k:'to_key_private', l:'to priv', wide:true}, {k:'to_key_public', l:'to pub', wide:true},
     {k:'uuid', l:'VLESS uuid'}, {k:'transport', l:'VLESS transport', sel:['','tcp','ws','xhttp']},
     {k:'security', l:'VLESS security', sel:['','reality','tls','none']},
     {k:'sni', l:'VLESS sni'}, {k:'dest', l:'VLESS dest'}, {k:'path', l:'VLESS path'},
-    {k:'flow', l:'VLESS flow'}, {k:'short_id', l:'VLESS short_id'},
+    {k:'flow', l:'VLESS Flow', sel:['','none','xtls-rprx-vision'], labels:{'':'Авто',none:'Без Flow','xtls-rprx-vision':'Vision'}}, {k:'short_id', l:'VLESS short_id'},
     {k:'public_key', l:'VLESS public_key', wide:true}, {k:'private_key', l:'VLESS private_key', wide:true},
     {k:'listen_port_in', l:'VLESS порт', num:true}
   ],
   clients: [
     {k:'id', l:'id'}, {k:'email', l:'Email (метка)'}, {k:'enabled', l:'вкл', bool:true},
     {k:'expires_at', l:'Истекает (RFC3339)'}, {k:'quota_gb', l:'Квота, ГБ', num:true},
-    {k:'uuid', l:'UUID', wide:true}, {k:'flow', l:'flow'}, {k:'sub_token', l:'sub_token', wide:true},
+    {k:'uuid', l:'UUID', wide:true}, {k:'flow', l:'Flow', sel:['','none','xtls-rprx-vision'], labels:{'':'Как в инбаунде',none:'Без Flow','xtls-rprx-vision':'Vision'}}, {k:'sub_token', l:'sub_token', wide:true},
     {k:'inbounds', l:'Инбаунды клиента', multi:'inbounds', wide:true}
   ],
   routes: [
     {k:'id', l:'id'}, {k:'name', l:'Имя'}, {k:'enabled', l:'вкл', bool:true},
     {k:'node_id', l:'Узел (пусто = все)', ref:'nodes'}, {k:'outbound', l:'Исходящий', outbound:true},
-    {k:'user', l:'Пользователи (по одному в строке)', lines:true, wide:true},
-    {k:'inbound', l:'Теги инбаундов', lines:true, wide:true},
+    {k:'user', l:'Пользователи', multi:'users', wide:true},
+    {k:'inbound', l:'Входящие инбаунды', multi:'route-inbounds', wide:true},
     {k:'domain', l:'Домены: full: / domain: / regexp: / geosite:', lines:true, wide:true},
     {k:'ip', l:'IP / CIDR / geoip:', lines:true, wide:true},
     {k:'port', l:'Порты (80,443,1000-2000)'},
@@ -154,6 +154,7 @@ const GROUPS = {
 };
 
 let ST = null, TAB = 'nodes', TOAST = '', TOASTERR = false;
+let LOCAL_NODE = '', PANEL_TLS = false;
 const OPEN = new Set();   // ключи раскрытых карточек
 
 async function api(path, opt){
@@ -175,6 +176,8 @@ function renderToast(){
 async function boot(){
   try{
     const me = await api('/api/me');
+    LOCAL_NODE = me.local_node || '';
+    PANEL_TLS = !!me.panel_tls;
     document.getElementById('who').textContent = me.noauth ? 'без пароля (--noauth)' : (me.user||'');
   }catch(e){ return; }
   await load();
@@ -183,7 +186,7 @@ async function load(){ ST = await api('/api/state'); render(); }
 async function save(){
   try{
     ST = await api('/api/state',{method:'PUT',headers:{'content-type':'application/json'},body:JSON.stringify(ST)});
-    toast('Сохранено');
+    toast('Сохранено. Для запуска изменений примени конфигурацию во вкладке «Рендер».');
   }catch(e){ toast('Не сохранилось:\n'+e.message, true); }
   render();
 }
@@ -200,7 +203,21 @@ function plural(n, one, few, many){
 }
 function nodeLabel(id){ const n=(ST.nodes||[]).find(x=>x.id===id); return n?(n.name||n.id):(id||'—'); }
 function outboundOptions(nodeId){
-  return ['direct','block', ...(ST.tunnels||[]).filter(x=>x.enabled && x.from_node_id===nodeId).map(x=>'tun:'+x.name)];
+  return ['direct','block', ...(ST.tunnels||[]).filter(x=>x.enabled && (!nodeId || x.from_node_id===nodeId)).map(x=>'tun:'+x.name)];
+}
+function inboundChoices(nodeId){
+  return [
+    ...(ST.inbounds||[]).filter(x=>x.tag && (!nodeId || x.node_id===nodeId)).map(x=>[x.tag, `${x.name || x.tag} (${nodeLabel(x.node_id)} · ${x.tag})`]),
+    ...(ST.tunnels||[]).filter(x=>x.kind==='vless' && (!nodeId || x.to_node_id===nodeId)).map(x=>['tun:'+x.name, `${x.name} (приём · ${nodeLabel(x.to_node_id)})`])
+  ];
+}
+function memberOptions(r, kind){
+  if(kind==='users') return (ST.clients||[]).filter(c=>c.email).map(c=>[c.email,c.email]);
+  if(kind==='route-inbounds'){
+    const tunnel = (ST.tunnels||[]).find(t=>'tun:'+t.name===r.outbound && t.enabled);
+    return inboundChoices(r.node_id || tunnel?.from_node_id);
+  }
+  return (ST.inbounds||[]).map(x=>[x.id, `${x.name || x.tag || x.id} (${x.kind==='wireguard'?'WireGuard':'VLESS'})`]);
 }
 
 function render(){
@@ -253,8 +270,8 @@ function titleOf(tab,r){
 function summaryOf(tab,r){
   switch(tab){
     case 'nodes': {
-      const st = r.status==='alive' ? `● жив${r.latency_ms?' '+r.latency_ms+' мс':''}`
-               : r.status==='dead' ? '○ мёртв' : '◌ не проверялся';
+      const st = r.status==='alive' ? `● SSH доступен${r.latency_ms?' '+r.latency_ms+' мс':''}`
+               : r.status==='dead' ? '○ SSH недоступен' : '◌ SSH не проверялся';
       const hs = (r.handshake_age>=0) ? 'handshake '+r.handshake_age+' с' : '';
       return [st, r.role||'both', r.public_addr||'адрес не задан',
               r.mgmt_via?('via '+r.mgmt_via):'', hs,
@@ -298,8 +315,12 @@ function actions(tab,i,r){
   if(tab==='clients') b += `<button class="b" title="UUID" onclick="${stop}genUUID(${i})">🆔</button>
     <button class="b" title="токен подписки" onclick="${stop}genToken(${i})">🎫</button>
     <button class="b" title="ссылки подписки" onclick="${stop}subLinks(${i})">sub</button>`;
-  if(tab==='nodes') b += `<button class="b" title="проверить сейчас" onclick="${stop}checkNodes()">🔍</button>
-    <button class="b" title="поставить/обновить на хосте" onclick="${stop}reinstallNode(${i})">⚙</button>`;
+  if(tab==='nodes'){
+    b += `<button class="b" title="проверить сейчас" onclick="${stop}checkNodes()">🔍</button>`;
+    b += r.id===LOCAL_NODE
+      ? `<button class="b" title="конфигурация локального узла" onclick="${stop}TAB='render';render()">⚙</button>`
+      : `<button class="b" title="поставить/обновить на хосте" onclick="${stop}reinstallNode(${i})">⚙</button>`;
+  }
   if(tab==='routes') b += `<button class="b" title="выше" onclick="${stop}moveRow(${i},-1)">↑</button>
     <button class="b" title="ниже" onclick="${stop}moveRow(${i},1)">↓</button>`;
   b += `<button class="b" title="удалить" onclick="${stop}delRow('${tab}',${i})">✕</button>`;
@@ -315,7 +336,7 @@ function bodyOf(tab,i,r){
       if(title==='VLESS' && r.kind!=='vless') continue;
     }
     const fields = SCHEMA[tab].filter(f=>keys.includes(f.k))
-      .filter(f=>!f.only || r.security===f.only);
+      .filter(f=>(!f.only || r.security===f.only) && (!f.sources || f.sources.includes(r.cert_source)));
     if(!fields.length) continue;
     html += `<div class="grp">${title}</div><div class="grid">`;
     for(const f of fields){
@@ -346,26 +367,30 @@ function cell(tab,i,r,f){
   const val = r[f.k];
   const on = `onchange="edit('${tab}',${i},'${f.k}',this)"`;
   if(f.bool) return `<input type="checkbox" ${val?'checked':''} ${on}>`;
-  if(f.sel) return `<select ${on}>${f.sel.map(o=>`<option ${o===val?'selected':''} value="${esc(o)}">${esc(f.labels?.[o]||o||'—')}</option>`).join('')}</select>`;
+  if(f.sel){
+    const panelAvailable = PANEL_TLS && r.node_id===LOCAL_NODE;
+    const visionAvailable = tab==='clients' || ((!r.transport || r.transport==='tcp') && ['tls','reality',''].includes(r.security||''));
+    const unavailable = o => (o==='panel' && !panelAvailable) || (o==='xtls-rprx-vision' && !visionAvailable);
+    const opts = f.sel.filter(o=>!unavailable(o) || val===o);
+    return `<select ${on}>${opts.map(o=>`<option ${o===val?'selected':''} ${unavailable(o)?'disabled':''} value="${esc(o)}">${esc(f.labels?.[o]||o||'—')}</option>`).join('')}</select>`;
+  }
   if(f.ref){
     const opts = ['',...(ST[f.ref]||[]).map(n=>n.id)];
     return `<select ${on}>${opts.map(o=>`<option ${o===val?'selected':''} value="${esc(o)}">${o?esc(nodeLabel(o)):'—'}</option>`).join('')}</select>`;
   }
   if(f.outbound){
-    const node = r.node_id || (ST.nodes[0]&&ST.nodes[0].id);
-    const opts = outboundOptions(node);
+    const opts = outboundOptions(r.node_id);
     if(val && !opts.includes(val)) opts.push(val);
     return `<select ${on}>${opts.map(o=>`<option ${o===val?'selected':''} value="${esc(o)}">${esc(o)}</option>`).join('')}</select>`;
   }
   if(f.multi){
-    const pool = ST[f.multi]||[];
     const chosen = val||[];
-    if(!pool.length) return '<span class="mut">сначала создай инбаунд</span>';
-    return '<div class="ms">' + pool.map((x,idx)=>{
-      const id = x.id, label = x.tag || x.name || x.id;
-      const protocol = x.kind==='wireguard' ? 'WireGuard' : 'VLESS';
-      return `<label><input type="checkbox" ${chosen.includes(id)?'checked':''}
-        onchange="toggleMember('${tab}',${i},'${f.k}',${idx},this.checked)"> ${esc(label)} (${protocol})</label>`;
+    const pool = new Map(memberOptions(r, f.multi));
+    for(const value of chosen){ if(!pool.has(value)) pool.set(value, value+' (вне выбора)'); }
+    if(!pool.size) return '<span class="mut">нет доступных вариантов</span>';
+    return '<div class="ms">' + [...pool].map(([id,label])=>{
+      return `<label><input type="checkbox" value="${esc(id)}" ${chosen.includes(id)?'checked':''}
+        onchange="toggleMember('${tab}',${i},'${f.k}',this.value,this.checked)"> ${esc(label)}</label>`;
     }).join('') + '</div>';
   }
   if(f.lines) return `<textarea ${on}>${esc((val||[]).join('\n'))}</textarea>`;
@@ -382,11 +407,18 @@ function edit(tab,i,key,el){
   }
   const row = ST[tab][i];
   ST[tab][i][key] = v;
+  if(tab==='inbounds' && key==='node_id' && row.cert_source==='panel' && v!==LOCAL_NODE){
+    row.cert_source='acme';
+    Object.assign(row,{cert_file:'',key_file:'',sni:'',self_signed:false});
+  }
+  if(tab==='inbounds' && key==='cert_source'){
+    Object.assign(row,{cert_file:'',key_file:'',sni:'',self_signed:v==='selfsigned'});
+  }
   if(key==='kind' && tab==='inbounds'){
-    if(v==='wireguard' && row.port===443) row.port=51820;
+    if(v==='wireguard' && row.port===443) row.port=nextWGPort(row);
     if(v==='vless' && row.port===51820) row.port=443;
   }
-  if(key==='kind' || key==='security'){ render(); return; }
+  if(['kind','security','cert_source','transport'].includes(key) || (tab==='routes' && ['node_id','outbound'].includes(key)) || (tab==='inbounds' && key==='node_id')){ render(); return; }
   if(key==='enabled' || key==='node_id' || key==='outbound' || key==='mark'){ refreshHeader(); return; }
 }
 function refreshHeader(){
@@ -401,8 +433,18 @@ function setWGSubnet(i,subnet){
   const inbound = ST.inbounds[i];
   inbound.wireguard = {...inbound.wireguard, subnet};
 }
-function toggleMember(tab,i,key,idx,checked){
-  const id = ST.inbounds[idx].id;
+function nextWGPort(inbound){
+  const ports = new Set((ST.inbounds||[]).filter(x=>x!==inbound && x.enabled && x.kind==='wireguard' && x.node_id===inbound.node_id).map(x=>x.port));
+  for(const t of ST.tunnels||[]){
+    if(!t.enabled || !['wg','wg-reverse'].includes(t.kind)) continue;
+    const listener = t.kind==='wg' ? t.to_node_id : t.from_node_id;
+    if(listener===inbound.node_id) ports.add(t.listen_port || 51820);
+  }
+  let port=51820;
+  while(ports.has(port) && port<65535) port++;
+  return port;
+}
+function toggleMember(tab,i,key,id,checked){
   const r = ST[tab][i];
   const list = new Set(r[key]||[]);
   checked ? list.add(id) : list.delete(id);
@@ -422,8 +464,12 @@ function addRow(tab){
   }
   el.id = tab.slice(0,2) + '-' + Math.random().toString(16).slice(2,6);
   if(tab==='nodes'){ el.role='both'; el.core='xray'; el.public_addr='host.example.com:443'; }
-  if(tab==='inbounds'){ el.listen='0.0.0.0'; el.port=443; el.transport='tcp'; el.security='tls'; el.cert_source='acme'; el.enabled=true; }
-  if(tab==='tunnels'){ el.kind='wg-reverse'; el.enabled=true; el.keepalive=25; el.listen_port=51820; el.egress_iface='ens3'; el.forward_policy=true; }
+  if(tab==='inbounds'){
+    el.node_id = ST.nodes?.find(n=>n.id===LOCAL_NODE)?.id || ST.nodes?.[0]?.id || '';
+    el.listen='0.0.0.0'; el.port=443; el.transport='tcp'; el.security='tls';
+    el.cert_source=PANEL_TLS && el.node_id===LOCAL_NODE?'panel':'acme';
+  }
+  if(tab==='tunnels'){ el.kind='wg-reverse'; el.enabled=true; el.keepalive=25; el.listen_port=51820; el.forward_policy=true; }
   if(tab==='clients'){ el.enabled=true; }
   if(tab==='routes'){ el.enabled=true; el.outbound='direct'; }
   (ST[tab] = ST[tab]||[]).push(el);
@@ -440,7 +486,7 @@ function moveRow(i,dir){
 // ---------- мастер «добавить хост и всё поставить»
 
 function wizardHTML(){
-  const hub = (ST.nodes||[])[0];
+  const hub = (ST.nodes||[]).find(n=>n.id===LOCAL_NODE) || (ST.nodes||[])[0];
   return `<div class="card" style="margin-bottom:14px">
     <div class="hd" onclick="document.getElementById('wiz').hidden=!document.getElementById('wiz').hidden">
       <span class="idx">＋</span>
@@ -477,7 +523,7 @@ function wizardHTML(){
       </div>
       <div class="row" style="margin-top:10px">
         <button class="b p" onclick="provisionAdd()" id="w_go">Поставить и связать</button>
-        <span class="mut">хаб: ${esc(hub?hub.name||hub.id:'—')} · установка идёт по SSH, это минуты</span>
+        <label>Начало туннеля <select id="w_hub" style="width:auto;max-width:100%">${(ST.nodes||[]).map(n=>`<option value="${esc(n.id)}" ${n.id===hub?.id?'selected':''}>${esc(n.name||n.id)}</option>`).join('')}</select></label>
       </div>
       <pre id="w_log" style="display:none"></pre>
     </div>
@@ -499,7 +545,7 @@ function wizTLS(){
 async function provisionAdd(){
   const btn = document.getElementById('w_go'), log = document.getElementById('w_log');
   const body = {
-    name: val('w_name'), addr: val('w_addr'), hub_node_id: (ST.nodes[0]||{}).id,
+    name: val('w_name'), addr: val('w_addr'), hub_node_id: val('w_hub'),
     ssh_user: val('w_user')||'root', ssh_password: val('w_pass'), ssh_key_file: val('w_key'),
     tls_by: val('w_tlsby'), domain: val('w_domain'), ip: val('w_ip'), acme_email: val('w_email'),
     tunnel_kind: val('w_kind'),
@@ -515,9 +561,13 @@ async function provisionAdd(){
   log.style.display='block'; log.textContent = 'подключаюсь по SSH и ставлю…';
   try{
     const rep = await api('/api/node/provision', {method:'POST', headers:{'content-type':'application/json'}, body:JSON.stringify(body)});
-    log.textContent = (rep.steps||[]).join('\n') + '\n\n' + (rep.bootstrap||'');
     await load();
-    toast('узел добавлен: ' + (rep.node_id||''));
+    const report = document.getElementById('w_log');
+    if(report){
+      report.style.display='block';
+      report.textContent = (rep.steps||[]).join('\n') + '\n\n' + (rep.bootstrap||'');
+    }
+    toast('Выходной узел добавлен. Примени конфигурацию хаба во вкладке «Рендер».');
   }catch(e){
     log.textContent = 'ошибка: ' + e.message;
     toast('установка не удалась', true);
@@ -546,10 +596,10 @@ function val(id){ const el = document.getElementById(id); return el ? el.value.t
 function hintFor(tab){
   return {
     nodes:'Узел — хост в сети. Панель ходит на него по SSH: ставит ядро и wireguard, кладёт конфиг и проверяет. Статус обновляется фоном каждые 20 секунд.',
-    inbounds:'Выбери VLESS или WireGuard. WireGuard слушает UDP, ключ сервера создаётся при сохранении.',
+    inbounds:'Выбери сервер, на котором клиент подключится к инбаунду. Для маршрута через выходной туннель выбери хаб — начало этого туннеля.',
     tunnels:'wg — слушает to, звонит from. wg-reverse — наоборот (нужно, если to за NAT). Трафик всегда from → to.',
     clients:'UUID и sub_token создаются сами при сохранении, если пусты.',
-    routes:'Порядок = приоритет, первый матч выигрывает. Открой карточку, чтобы увидеть условия.'
+    routes:'Первое совпавшее правило выигрывает. Сохрани правила и примени конфигурацию узла во вкладке «Рендер».'
   }[tab]||'';
 }
 
@@ -584,10 +634,10 @@ async function subLinks(i){
 function renderOut(v){
   const nodes = ST.nodes||[];
   v.innerHTML = `<div class="row">
-    <select id="rnode" style="width:auto">${nodes.map(n=>`<option value="${esc(n.id)}">${esc(n.name||n.id)}</option>`).join('')}</select>
+    <select id="rnode" style="width:auto;max-width:100%">${nodes.map(n=>`<option value="${esc(n.id)}" ${n.id===LOCAL_NODE?'selected':''}>${esc(n.name||n.id)}</option>`).join('')}</select>
     <button class="b" onclick="preview()">Предпросмотр xray.json</button>
     <button class="b p" onclick="renderFiles()">Сгенерировать артефакты</button>
-    <span class="mut">артефакты → out/&lt;node&gt;/; применение — apply.sh на узле</span>
+    <span class="mut">Конфигурацию WG-туннеля нужно применить на обоих серверах.</span>
   </div><pre id="out">—</pre>`;
 }
 async function preview(){
@@ -599,8 +649,10 @@ async function renderFiles(){
   const n = document.getElementById('rnode').value;
   try{
     const j = await api('/api/render',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({node:n})});
+    const script = "'" + (j.dir+'/apply.sh').replaceAll("'", "'\\''") + "'";
+    const apply = j.local ? '\n\nНа сервере панели выполни:\nsudo bash ' + script : '\n\nДля удалённого узла используй ⚙ в его карточке.';
     document.getElementById('out').textContent = j.dir + '\n\n' +
-      j.files.map(f=>`${f.name.padEnd(26)} ${String(f.size).padStart(6)} B  ${f.sha.slice(0,12)}`).join('\n');
+      j.files.map(f=>`${f.name.padEnd(26)} ${String(f.size).padStart(6)} B  ${f.sha.slice(0,12)}`).join('\n') + apply;
     toast('отрендерено: '+j.dir);
   }catch(e){ toast(e.message,true); }
 }
@@ -609,8 +661,9 @@ function renderCheck(v){
   const nodes = ST.nodes||[];
   v.innerHTML = `<div class="hint">Dry-run: первый матч по правилам узла. geoip/geosite локально не раскрываются, поэтому выводятся отдельным списком «могут перехватить».</div>
   <div class="row">
-    <select id="cnode" style="width:auto">${nodes.map(n=>`<option value="${esc(n.id)}">${esc(n.name||n.id)}</option>`).join('')}</select>
-    <input id="cuser" placeholder="пользователь" style="width:170px">
+    <select id="cnode" style="width:auto" onchange="updateCheckInbounds()">${nodes.map(n=>`<option value="${esc(n.id)}">${esc(n.name||n.id)}</option>`).join('')}</select>
+    <select id="cinbound" aria-label="Входящий инбаунд" style="width:auto;max-width:100%"></select>
+    <select id="cuser" aria-label="Пользователь" style="width:auto;max-width:100%"><option value="">Любой пользователь</option>${memberOptions({},'users').map(([value,label])=>`<option value="${esc(value)}">${esc(label)}</option>`).join('')}</select>
     <input id="cdomain" placeholder="домен" style="width:190px">
     <input id="cip" placeholder="IP" style="width:140px">
     <input id="cport" placeholder="порт" style="width:80px">
@@ -618,10 +671,16 @@ function renderCheck(v){
     <button class="b p" onclick="checkRoute()">Проверить</button>
   </div>
   <pre id="out">—</pre>`;
+  updateCheckInbounds();
+}
+function updateCheckInbounds(){
+  const choices = new Map(inboundChoices(val('cnode')));
+  document.getElementById('cinbound').innerHTML = '<option value="">Любой инбаунд</option>' + [...choices].map(([value,label])=>`<option value="${esc(value)}">${esc(label)}</option>`).join('');
 }
 async function checkRoute(){
   const q = new URLSearchParams({
     node: document.getElementById('cnode').value,
+    inbound: document.getElementById('cinbound').value,
     user: document.getElementById('cuser').value,
     domain: document.getElementById('cdomain').value,
     ip: document.getElementById('cip').value,

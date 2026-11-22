@@ -127,11 +127,8 @@ func buildInbound(st model.State, in model.Inbound) (map[string]any, error) {
 			continue
 		}
 		cl := map[string]any{"id": c.UUID, "email": c.Email}
-		if in.Flow != "" {
-			cl["flow"] = c.Flow
-			if c.Flow == "" {
-				cl["flow"] = in.Flow
-			}
+		if flow := in.ClientFlow(c); flow != "" {
+			cl["flow"] = flow
 		}
 		clients = append(clients, cl)
 	}
@@ -146,6 +143,9 @@ func buildInbound(st model.State, in model.Inbound) (map[string]any, error) {
 	sni, cert, key := in.SNI, in.CertFile, in.KeyFile
 	if in.Security == "tls" {
 		sni, cert, key = tlsResolve(in.CertSource, in.Domain, in.IP, in.CertFile, in.KeyFile)
+		if in.SNI != "" {
+			sni = in.SNI
+		}
 	}
 	stream, err := streamSettings(streamOpts{
 		Transport: in.Transport, Security: in.Security, SNI: sni, Dest: in.Dest,
@@ -215,8 +215,8 @@ func buildVlessTunnelInbound(t model.Tunnel) (map[string]any, error) {
 		return nil, err
 	}
 	client := map[string]any{"id": t.UUID, "email": "tunnel:" + t.Name}
-	if t.Flow != "" {
-		client["flow"] = t.Flow
+	if flow := model.EffectiveFlow(t.Flow, t.Transport, t.Security); flow != "" {
+		client["flow"] = flow
 	}
 	return map[string]any{
 		"tag":            t.Tag(),
@@ -255,8 +255,8 @@ func buildVlessOutbound(st model.State, t model.Tunnel) (map[string]any, error) 
 		"id":         t.UUID,
 		"encryption": "none",
 	}
-	if t.Flow != "" {
-		settings["flow"] = t.Flow
+	if flow := model.EffectiveFlow(t.Flow, t.Transport, t.Security); flow != "" {
+		settings["flow"] = flow
 	}
 	return map[string]any{
 		"protocol":       "vless",

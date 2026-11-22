@@ -92,6 +92,7 @@ func cmdServe(args []string) {
 	noAuth := fs.Bool("noauth", false, "без пароля (только loopback, для отладки UI)")
 	tlsCert := fs.String("tls-cert", "", "сертификат для HTTPS панели")
 	tlsKey := fs.String("tls-key", "", "ключ для HTTPS панели")
+	localNode := fs.String("local-node", "node-1", "id узла, на котором работает панель")
 	fs.Parse(args)
 
 	st, err := store.Open(*statePath)
@@ -102,7 +103,7 @@ func cmdServe(args []string) {
 	if err != nil {
 		log.Fatal(err)
 	}
-	srv := &api.Server{Store: st, OutDir: *outDir, NoAuth: *noAuth, Secrets: sec}
+	srv := &api.Server{Store: st, OutDir: *outDir, NoAuth: *noAuth, Secrets: sec, LocalNode: *localNode, TLSCert: *tlsCert, TLSKey: *tlsKey}
 	srv.Prov = &provision.Service{Store: st, Secrets: sec, OutDir: *outDir}
 	srv.Mon = &monitor.Monitor{Store: st}
 

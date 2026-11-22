@@ -129,8 +129,8 @@ func (s *Service) Run(req Request) (*Report, error) {
 		ID: tunnelID, Name: "to-" + shortName(req.Addr), Kind: req.TunnelKind,
 		FromNode: hub.ID, ToNode: nodeID, Enabled: true,
 		ListenPort: req.WGPort, Keepalive: 25,
-		EgressIface: "ens3", ForwardPolicy: true,
-		Subnet: st.NextSubnet(), Mark: st.NextMark(),
+		ForwardPolicy: true,
+		Subnet:        st.NextSubnet(), Mark: st.NextMark(),
 	}
 	if tun.Kind == model.TunnelVLESS {
 		tun.ListenPortT = req.Port
@@ -254,7 +254,7 @@ func (s *Service) Run(req Request) (*Report, error) {
 	plan := bootstrap.Plan{
 		Files:       planExtra,
 		Artifacts:   exitFiles,
-		InstallXray: tun.Kind == model.TunnelVLESS,
+		InstallXray: gen.NeedsXray(st, nodeID),
 		InstallWG:   tun.Kind == model.TunnelWG || tun.Kind == model.TunnelWGReverse,
 		XrayUnit:    xrayUnit,
 		RemoteDir:   "/opt/revhub",
@@ -312,15 +312,17 @@ func (s *Service) Run(req Request) (*Report, error) {
 	man.Node = hub.ID
 	_ = os.WriteFile(filepath.Join(dir, "manifest.json"), man.JSON(), 0o640)
 	rep.Steps = append(rep.Steps, "артефакты хаба обновлены: "+dir)
+	if !req.ApplyLocal {
+		rep.Steps = append(rep.Steps, "хаб ожидает применения: открой «Рендер», сгенерируй артефакты хаба и выполни показанную команду")
+	}
 
 	if req.ApplyLocal {
 		out, err := applyLocal(dir)
 		rep.LocalApply = out
 		if err != nil {
-			rep.Steps = append(rep.Steps, "локальное применение хаба НЕ удалось: "+err.Error())
-		} else {
-			rep.Steps = append(rep.Steps, "хаб применён локально")
+			return rep, fmt.Errorf("применение на хабе: %w\n%s", err, out)
 		}
+		rep.Steps = append(rep.Steps, "хаб применён локально")
 	}
 	return rep, nil
 }
@@ -342,22 +344,13 @@ func (s *Service) reinstall(req Request) (*Report, error) {
 	if err != nil {
 		return rep, err
 	}
-	needWG, needXray := false, false
+	needWG := false
 	for _, t := range st.Tunnels {
-		if !t.Enabled || !t.Touches(node.ID) {
-			continue
-		}
-		if t.Kind == model.TunnelVLESS {
-			needXray = true
-		} else {
+		if t.Enabled && t.Touches(node.ID) && (t.Kind == model.TunnelWG || t.Kind == model.TunnelWGReverse) {
 			needWG = true
 		}
 	}
-	for _, in := range st.Inbounds {
-		if in.NodeID == node.ID && in.Enabled {
-			needXray = true
-		}
-	}
+	needXray := !needWG || gen.NeedsXray(st, node.ID)
 	sec, _ := s.Secrets.Get(node.ID)
 	res, err := bootstrap.RunWith(s.opener(), sshx.Target{
 		Addr: node.SSHAddr, User: node.SSHUser,

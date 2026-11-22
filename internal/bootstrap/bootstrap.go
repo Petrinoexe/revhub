@@ -322,7 +322,7 @@ func RunWith(open Open, t sshx.Target, p Plan, logf func(string)) (*Result, erro
 	}
 
 	if err := step("применение", func() (string, error) {
-		out, err := cli.Run("cd " + p.RemoteDir + " && bash apply.sh 2>&1 | tail -20")
+		out, err := cli.Run("cd " + p.RemoteDir + " && bash apply.sh")
 		if err != nil {
 			return strings.TrimSpace(out), err
 		}
@@ -331,24 +331,42 @@ func RunWith(open Open, t sshx.Target, p Plan, logf func(string)) (*Result, erro
 		return res, err
 	}
 
-	_ = step("проверка ядра", func() (string, error) {
-		out, _ := cli.Run("systemctl is-active xray 2>/dev/null || true")
-		res.XrayState = strings.TrimSpace(out)
-		if res.XrayState != "active" {
-			return res.XrayState, fmt.Errorf("сервис xray не active")
+	if p.InstallXray {
+		if err := step("проверка ядра", func() (string, error) {
+			out, err := cli.Run("systemctl is-active xray")
+			res.XrayState = strings.TrimSpace(out)
+			if err != nil || res.XrayState != "active" {
+				return "", fmt.Errorf("сервис xray не active (%s)", res.XrayState)
+			}
+			return res.XrayState, nil
+		}); err != nil {
+			return res, err
 		}
-		return res.XrayState, nil
-	})
+	}
 
 	if p.InstallWG {
-		_ = step("проверка туннелей", func() (string, error) {
-			out, _ := cli.Run("wg show interfaces 2>/dev/null || true")
-			res.WGUp = strings.Fields(strings.TrimSpace(out))
-			if len(res.WGUp) == 0 {
-				return "", fmt.Errorf("ни одного wg-интерфейса")
+		if err := step("проверка туннелей", func() (string, error) {
+			out, err := cli.Run("wg show interfaces")
+			if err != nil {
+				return "", err
+			}
+			res.WGUp = strings.Fields(out)
+			up := map[string]bool{}
+			for _, name := range res.WGUp {
+				up[name] = true
+			}
+			for _, file := range p.Artifacts {
+				if strings.HasPrefix(file.Name, "wg-") && strings.HasSuffix(file.Name, ".conf") {
+					name := strings.TrimSuffix(file.Name, ".conf")
+					if !up[name] {
+						return "", fmt.Errorf("интерфейс %s не поднялся", name)
+					}
+				}
 			}
 			return strings.Join(res.WGUp, ", "), nil
-		})
+		}); err != nil {
+			return res, err
+		}
 	}
 
 	_ = step("выход в интернет", func() (string, error) {

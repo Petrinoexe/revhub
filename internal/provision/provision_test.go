@@ -59,7 +59,14 @@ func (f *fakeNode) Run(cmd string) (string, error) {
 	case strings.HasPrefix(cmd, "systemctl is-active xr"):
 		return "active", nil
 	case strings.HasPrefix(cmd, "wg show interfac"):
-		return "wg-to-198-51-100-9", nil
+		var interfaces []string
+		for path := range f.files {
+			name := filepath.Base(path)
+			if strings.HasPrefix(name, "wg-") && strings.HasSuffix(name, ".conf") {
+				interfaces = append(interfaces, strings.TrimSuffix(name, ".conf"))
+			}
+		}
+		return strings.Join(interfaces, " "), nil
 	case strings.HasPrefix(cmd, "curl -s -m 8 https://if"):
 		return "198.51.100.9", nil
 	}
@@ -151,7 +158,7 @@ func TestProvisionAddsNodeAndInstalls(t *testing.T) {
 	if _, ok := fake.files["/opt/revhub/xray.json"]; !ok {
 		t.Error("xray.json не загружен на выходной")
 	}
-	if _, ok := fake.files["/opt/revhub/wg-to-198-51-100-9.conf"]; !ok {
+	if _, ok := fake.files["/opt/revhub/"+tun.WGInterface()+".conf"]; !ok {
 		t.Errorf("wg-конфиг не загружен; файлы: %v", keys(fake.files))
 	}
 	// и секрет не попал в состояние
