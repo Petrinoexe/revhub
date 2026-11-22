@@ -196,11 +196,10 @@ func Run(o Options) (*Report, error) {
 		if len(missing) == 0 {
 			return "уже стоят: wg, wg-quick, nft", nil
 		}
-		if err := r.run("apt-get", "update", "-qq"); err != nil {
+		if waits, err := r.installPkgs("wireguard-tools", "nftables"); err != nil {
 			return "", err
-		}
-		if err := r.run("apt-get", "install", "-y", "-qq", "wireguard-tools", "nftables"); err != nil {
-			return "", err
+		} else if waits > 0 {
+			return fmt.Sprintf("поставлены: wireguard-tools, nftables (ждали apt %d раз)", waits), nil
 		}
 		return "поставлены: wireguard-tools, nftables", nil
 	})

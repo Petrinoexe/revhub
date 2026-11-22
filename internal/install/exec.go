@@ -7,6 +7,9 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
+
+	"revhub/internal/pkgmgr"
 )
 
 // lookPath ищет бинарь в PATH.
@@ -20,6 +23,32 @@ func lookXray(prefix string) (string, error) {
 		}
 	}
 	return exec.LookPath("xray")
+}
+
+// installPkgs ставит системные пакеты на этой машине, дожидаясь чужой
+// блокировки apt/dpkg (cloud-init на свежей установке, unattended-upgrades).
+// Возвращает число ожиданий — чтобы в отчёте было видно, что мы ждали, а не
+// висели.
+func (r *runner) installPkgs(list ...string) (int, error) {
+	if r.dry {
+		return 0, nil
+	}
+	cmd := pkgmgr.Cmd(strings.Join(list, " "))
+	waits := 0
+	for attempt := 1; ; attempt++ {
+		err := runCmd("sh", "-c", cmd)
+		if err == nil {
+			return waits, nil
+		}
+		if !pkgmgr.Busy(err.Error()) {
+			return waits, err
+		}
+		if attempt >= pkgmgr.Attempts {
+			return waits, pkgmgr.Exhausted(err)
+		}
+		waits++
+		time.Sleep(pkgmgr.Delay)
+	}
 }
 
 // runCmd запускает команду и возвращает ошибку вместе с хвостом stderr —

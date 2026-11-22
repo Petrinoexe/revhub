@@ -23,6 +23,8 @@ type fakeRunner struct {
 	failOn    string
 	// xrayUnitOwn — на «узле» уже стоит наш юнит xray (читает наш конфиг).
 	xrayUnitOwn bool
+	// aptLocked — сколько первых вызовов apt ответят «занято» (cloud-init).
+	aptLocked int
 }
 
 func newFakeRunner() *fakeRunner {
@@ -68,7 +70,13 @@ func (f *fakeRunner) Run(cmd string) (string, error) {
 		return "", nil
 	case cmd == "systemctl daemon-reload":
 		return "", nil
-	case strings.Contains(cmd, "apt-get install"):
+	case strings.Contains(cmd, "apt-get") && strings.Contains(cmd, "install -y -qq"):
+		if f.aptLocked > 0 {
+			f.aptLocked--
+			return "E: Could not get lock /var/lib/dpkg/lock-frontend. It is held by process 1532 (apt-get)\n" +
+					"E: Unable to acquire the dpkg frontend lock (/var/lib/dpkg/lock-frontend), is another process using it?",
+				fmt.Errorf("DEBIAN_FRONTEND=noninteractive apt-get: exit status 100: E: Could not get lock")
+		}
 		return "", nil
 	case strings.Contains(cmd, "bash apply.sh"):
 		if strings.Contains(cmd, "| tail") {
@@ -275,7 +283,8 @@ func TestBootstrapInstallsPackages(t *testing.T) {
 	}
 	found := false
 	for _, c := range f.cmds {
-		if strings.Contains(c, "apt-get install -y -qq") && strings.Contains(c, "wireguard-tools") {
+		if strings.Contains(c, "install -y -qq") && strings.Contains(c, "wireguard-tools") &&
+			strings.Contains(c, "DPkg::Lock::Timeout") {
 			found = true
 		}
 	}

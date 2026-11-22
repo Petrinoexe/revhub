@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"revhub/internal/gen"
+	"revhub/internal/pkgmgr"
 	"revhub/internal/sshx"
 )
 
@@ -25,6 +26,28 @@ type File struct {
 // xrayRemoteConfig — путь конфига, который обязан читать наш юнит xray.service
 // на удалённом узле. По нему проверяем, наш ли там юнит.
 const xrayRemoteConfig = "/usr/local/etc/xray/config.json"
+
+// aptInstall ставит пакеты, дожидаясь чужой блокировки apt/dpkg.
+// Возвращает, сколько раз пришлось подождать (для понятного отчёта).
+func aptInstall(cli Runner, missing string, log func(string, ...any)) (int, error) {
+	cmd := pkgmgr.Cmd(missing)
+	waits := 0
+	for attempt := 1; ; attempt++ {
+		out, err := cli.Run(cmd)
+		if err == nil {
+			return waits, nil
+		}
+		if !pkgmgr.Busy(out + " " + err.Error()) {
+			return waits, err
+		}
+		if attempt >= pkgmgr.Attempts {
+			return waits, pkgmgr.Exhausted(err)
+		}
+		log("%s", pkgmgr.WaitMessage(attempt))
+		waits++
+		time.Sleep(pkgmgr.Delay)
+	}
+}
 
 type Plan struct {
 	Artifacts    []gen.File // готовые файлы узла: xray.json, wg-*.conf, apply.sh...
@@ -165,10 +188,15 @@ func RunWith(open Open, t sshx.Target, p Plan, logf func(string)) (*Result, erro
 			if missing == "" {
 				return "уже стоят", nil
 			}
-			if _, err := cli.Run("DEBIAN_FRONTEND=noninteractive apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq " + missing); err != nil {
+			waits, err := aptInstall(cli, missing, log)
+			if err != nil {
 				return "", err
 			}
-			return "поставлено: " + strings.TrimSpace(missing), nil
+			detail := "поставлено: " + strings.TrimSpace(missing)
+			if waits > 0 {
+				detail += fmt.Sprintf(" (ждали освобождения apt %d раз)", waits)
+			}
+			return detail, nil
 		}); err != nil {
 			return res, err
 		}
