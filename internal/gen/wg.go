@@ -205,7 +205,12 @@ func WGConfig(st model.State, t model.Tunnel, nodeID string) (string, error) {
 	b.WriteString("\n[Peer]\n")
 	fmt.Fprintf(&b, "PublicKey = %s\n", otherPub)
 	if nodeID == dialer {
-		fmt.Fprintf(&b, "PersistentKeepalive = %d\n", t.Keepalive)
+		// Keepalive — только по явному запросу (t.Keepalive > 0). По умолчанию
+		// его нет: соединение должен открывать дозванивающийся узел, а не
+		// слушающий, и лишний фоновый трафик нам не нужен.
+		if t.Keepalive > 0 {
+			fmt.Fprintf(&b, "PersistentKeepalive = %d\n", t.Keepalive)
+		}
 		// Endpoint — адрес слушающей стороны. Порт берём из туннеля, а не из
 		// public_addr узла: там лежит порт для клиентов (443), он тут не годится.
 		host := hostOnly(mustNode(st, listener).PublicAddr)

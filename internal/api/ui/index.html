@@ -108,7 +108,7 @@ const SCHEMA = {
     {k:'to_node_id', l:'To (выпускает в интернет)', ref:'nodes'},
     {k:'enabled', l:'вкл', bool:true}, {k:'mark', l:'mark', num:true},
     {k:'subnet', l:'Подсеть'}, {k:'listen_port', l:'ListenPort', num:true},
-    {k:'public_port', l:'PublicPort (если NAT)', num:true}, {k:'keepalive', l:'Keepalive', num:true},
+    {k:'public_port', l:'PublicPort (если NAT)', num:true}, {k:'keepalive', l:'Keepalive (0 = выкл; нужен за NAT)', num:true},
     {k:'egress_iface', l:'Выходной интерфейс (пусто = авто)'}, {k:'forward_policy', l:'NAT на выходном узле', bool:true},
     {k:'from_key_private', l:'from priv', wide:true}, {k:'from_key_public', l:'from pub', wide:true},
     {k:'to_key_private', l:'to priv', wide:true}, {k:'to_key_public', l:'to pub', wide:true},
@@ -582,7 +582,7 @@ function addRow(tab){
     el.listen='0.0.0.0'; el.port=443; el.transport='tcp'; el.security='tls';
     el.cert_source=PANEL_TLS && el.node_id===LOCAL_NODE?'panel':'acme';
   }
-  if(tab==='tunnels'){ el.kind='wg-reverse'; el.enabled=true; el.keepalive=25; el.listen_port=51820; el.forward_policy=true; }
+  if(tab==='tunnels'){ el.kind='wg-reverse'; el.enabled=true; el.keepalive=0; el.listen_port=51820; el.forward_policy=true; }
   if(tab==='clients'){ el.enabled=true; }
   if(tab==='routes'){ el.enabled=true; el.outbound='direct'; }
   (ST[tab] = ST[tab]||[]).push(el);

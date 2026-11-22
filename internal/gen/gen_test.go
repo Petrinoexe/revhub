@@ -174,6 +174,49 @@ func TestArtifactsSet(t *testing.T) {
 // zeroKey — валидный по форме ключ WireGuard (32 байта в base64).
 const zeroKey = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
 
+// Keepalive по умолчанию не пишем: соединение открывает дозванивающийся узел,
+// а PersistentKeepalive — только для случая, когда он за NAT.
+func TestWGConfigKeepaliveOnlyWhenRequested(t *testing.T) {
+	var st model.State
+	st.Nodes = []model.Node{{ID: "hub", PublicAddr: "194.67.203.189:65423"}, {ID: "exit", PublicAddr: "5.180.31.201:443"}}
+	st.Tunnels = []model.Tunnel{{ID: "tn", Name: "eu", Kind: model.TunnelWGReverse,
+		FromNode: "hub", ToNode: "exit", Enabled: true, Subnet: "10.77.3.0/30",
+		ListenPort: 51820, ForwardPolicy: true,
+		FromKeyPriv: zeroKey, FromKeyPub: zeroKey, ToKeyPriv: zeroKey, ToKeyPub: zeroKey}}
+
+	conf, err := WGConfig(st, st.Tunnels[0], "exit")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(conf, "PersistentKeepalive") {
+		t.Errorf("keepalive не должен появляться без запроса:\n%s", conf)
+	}
+	if !strings.Contains(conf, "Endpoint = 194.67.203.189:51820") {
+		t.Errorf("дозванивающаяся сторона должна знать Endpoint хаба:\n%s", conf)
+	}
+	// Слушающая сторона не получает ни Endpoint, ни keepalive — иначе хаб
+	// пытался бы сам открывать соединение к выходу.
+	hubConf, err := WGConfig(st, st.Tunnels[0], "hub")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(hubConf, "Endpoint") || strings.Contains(hubConf, "PersistentKeepalive") {
+		t.Errorf("у слушателя не должно быть Endpoint/keepalive:\n%s", hubConf)
+	}
+	if !strings.Contains(hubConf, "ListenPort = 51820") {
+		t.Errorf("слушатель обязан держать ListenPort:\n%s", hubConf)
+	}
+
+	st.Tunnels[0].Keepalive = 25
+	conf, err = WGConfig(st, st.Tunnels[0], "exit")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(conf, "PersistentKeepalive = 25") {
+		t.Errorf("явный keepalive должен попадать в [Peer]:\n%s", conf)
+	}
+}
+
 // Узел, который выпускает трафик туннеля, обязан получить и wg-quick@ для
 // автоподъёма, и постоянный (не только на время работы) ip_forward.
 func TestApplyScriptKeepsTunnelAndForwardingAfterReboot(t *testing.T) {

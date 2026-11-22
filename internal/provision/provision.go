@@ -130,7 +130,7 @@ func (s *Service) Run(req Request) (*Report, error) {
 	tun := model.Tunnel{
 		ID: tunnelID, Name: "to-" + shortName(req.Addr), Kind: req.TunnelKind,
 		FromNode: hub.ID, ToNode: nodeID, Enabled: true,
-		ListenPort: req.WGPort, Keepalive: 25,
+		ListenPort: req.WGPort, Keepalive: 0, // по умолчанию без PersistentKeepalive
 		ForwardPolicy: true,
 		Subnet:        st.NextSubnet(), Mark: st.NextMark(),
 	}

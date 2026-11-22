@@ -405,9 +405,9 @@ func (s *State) Normalize() {
 		if t.Mark == 0 {
 			t.Mark = s.NextMark()
 		}
-		if t.Keepalive == 0 {
-			t.Keepalive = 25
-		}
+		// Keepalive намеренно не подставляем: 0 = «не использовать».
+		// PersistentKeepalive нужен только если дозванивающаяся сторона за NAT,
+		// иначе это лишний фоновый трафик от выхода к хабу.
 		if t.ListenPort == 0 {
 			t.ListenPort = 51820
 		}
