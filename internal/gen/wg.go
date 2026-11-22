@@ -76,9 +76,37 @@ func Artifacts(st model.State, nodeID string) ([]File, error) {
 		}
 	}
 
+	// Раскачка нужна только дозванивающейся стороне и только без keepalive:
+	// слушатель не может разбудить пира, пока не знает его адреса.
+	var kicks []kick
+	for _, t := range st.Tunnels {
+		if !t.Enabled || t.Keepalive > 0 || t.DialerNode() != nodeID {
+			continue
+		}
+		if t.Kind != model.TunnelWG && t.Kind != model.TunnelWGReverse {
+			continue
+		}
+		fromAddr, toAddr, err := model.SubnetAddrs(t.Subnet)
+		if err != nil {
+			continue
+		}
+		peer := fromAddr
+		if t.ListenerNode() == t.ToNode {
+			peer = toAddr
+		}
+		kicks = append(kicks, kick{Iface: t.WGInterface(), Peer: peer})
+	}
+
 	files = append(files,
-		File{Name: "apply.sh", Content: applyScript(wgNames, useXray, NodePorts(st, nodeID), forward), Mode: 0o700},
-		File{Name: "rollback.sh", Content: rollbackScript(wgNames, useXray), Mode: 0o700},
+		// Обратный туннель открывает дозванивающаяся сторона. Слушатель не
+		// может её разбудить: пока сессии нет, у него нет адреса пира. Значит,
+		// будить должен сам дозванивающийся — скрипт и таймер ниже делают это
+		// только когда сессии действительно нет (keepalive мы не держим).
+		kickFiles(kicks)...,
+	)
+	files = append(files,
+		File{Name: "apply.sh", Content: applyScript(wgNames, useXray, NodePorts(st, nodeID), forward, kicks), Mode: 0o700},
+		File{Name: "rollback.sh", Content: rollbackScript(wgNames, useXray, kicks), Mode: 0o700},
 	)
 	return files, nil
 }
@@ -288,7 +316,59 @@ func pick(cond bool, a, b string) string {
 	return b
 }
 
-func applyScript(wgFiles []string, useXray bool, ports []string, forward bool) string {
+// kick — кого и по какому интерфейсу «раскачивать» на дозванивающейся стороне.
+type kick struct {
+	Iface string
+	Peer  string
+}
+
+// kickFiles рендерит скрипт и таймер, которые держат сессию обратного туннеля
+// без PersistentKeepalive. Скрипт шлёт один пакет только когда сессии нет:
+// в норме (сессия жива) фонового трафика нет вовсе.
+func kickFiles(kicks []kick) []File {
+	var out []File
+	for _, k := range kicks {
+		script := fmt.Sprintf(`#!/bin/sh
+# revhub: раскачка обратного туннеля %[1]s.
+# Соединение открывает дозванивающаяся сторона; слушатель не может её разбудить,
+# пока не знает адреса пира. Поэтому при отсутствии/устаревании сессии шлём
+# один пакет по туннелю — хендшейк уходит от нас к слушателю.
+set -u
+iface=%[1]s
+peer=%[2]s
+h=$(wg show "$iface" latest-handshakes 2>/dev/null | awk '{print $2}' | sort -n | tail -1)
+now=$(date +%%s)
+if [ -z "${h:-}" ] || [ "${h:-0}" -eq 0 ] || [ $((now-h)) -gt 150 ]; then
+  ping -c1 -W1 -I "$iface" "$peer" >/dev/null 2>&1 || true
+fi
+`, k.Iface, k.Peer)
+		out = append(out, File{Name: "kick-" + k.Iface + ".sh", Content: script, Mode: 0o755})
+		out = append(out, File{Name: "revhub-kick-" + k.Iface + ".service",
+			Content: fmt.Sprintf(`[Unit]
+Description=revhub: сессия туннеля %s
+After=wg-quick@%s.service
+
+[Service]
+Type=oneshot
+ExecStart=/etc/revhub/kick-%s.sh
+`, k.Iface, k.Iface, k.Iface), Mode: 0o644})
+		out = append(out, File{Name: "revhub-kick-" + k.Iface + ".timer",
+			Content: fmt.Sprintf(`[Unit]
+Description=revhub: держать сессию туннеля %s
+
+[Timer]
+OnBootSec=90s
+OnUnitActiveSec=60s
+AccuracySec=10s
+
+[Install]
+WantedBy=timers.target
+`, k.Iface), Mode: 0o644})
+	}
+	return out
+}
+
+func applyScript(wgFiles []string, useXray bool, ports []string, forward bool, kicks []kick) string {
 	var b strings.Builder
 	b.WriteString("#!/usr/bin/env bash\n")
 	b.WriteString("# Сгенерировано revhub. Порядок важен: сначала туннели, потом ядро.\n")
@@ -326,6 +406,30 @@ STATE_DIR=${STATE_DIR:-/etc/revhub}
 		// один раз, а systemd поднимет wg-quick@<имя> сам.
 		fmt.Fprintf(&b, "if [ -d /run/systemd/system ]; then systemctl enable %q >/dev/null 2>&1 || true; fi\n",
 			"wg-quick@"+name+".service")
+	}
+	if len(kicks) > 0 {
+		// Скрипт и таймер держат сессию без keepalive: пинг уходит только когда
+		// сессии нет. Ставим их после подъёма интерфейсов и сразу дёргаем один раз.
+		b.WriteString("install -d -m 755 /etc/revhub\n")
+		for _, k := range kicks {
+			fmt.Fprintf(&b, "install -m 755 %q /etc/revhub/%q\n",
+				"kick-"+k.Iface+".sh", "kick-"+k.Iface+".sh")
+		}
+		b.WriteString("if [ -d /run/systemd/system ]; then\n")
+		for _, k := range kicks {
+			fmt.Fprintf(&b, "  install -m 644 %q /etc/systemd/system/%q\n",
+				"revhub-kick-"+k.Iface+".service", "revhub-kick-"+k.Iface+".service")
+			fmt.Fprintf(&b, "  install -m 644 %q /etc/systemd/system/%q\n",
+				"revhub-kick-"+k.Iface+".timer", "revhub-kick-"+k.Iface+".timer")
+		}
+		b.WriteString("  systemctl daemon-reload\n")
+		for _, k := range kicks {
+			fmt.Fprintf(&b, "  systemctl enable --now %q >/dev/null 2>&1 || true\n", "revhub-kick-"+k.Iface+".timer")
+		}
+		b.WriteString("fi\n")
+		for _, k := range kicks {
+			fmt.Fprintf(&b, "/etc/revhub/%q\n", "kick-"+k.Iface+".sh")
+		}
 	}
 	if forward {
 		// Рантайм-настройка PostUp живёт до перезагрузки; drop-in оставляет её
@@ -371,11 +475,19 @@ echo "[revhub] применено. откат: ./rollback.sh"
 	return b.String()
 }
 
-func rollbackScript(wgFiles []string, useXray bool) string {
+func rollbackScript(wgFiles []string, useXray bool, kicks []kick) string {
 	var b strings.Builder
 	b.WriteString("#!/usr/bin/env bash\nset -euo pipefail\ncd \"$(dirname \"$0\")\"\n")
 	b.WriteString("XRAY_CONFIG=${XRAY_CONFIG:-/usr/local/etc/xray/config.json}\n")
 	b.WriteString("STATE_DIR=${STATE_DIR:-/etc/revhub}\n")
+	for _, k := range kicks {
+		fmt.Fprintf(&b, "systemctl disable --now %q >/dev/null 2>&1 || true\n", "revhub-kick-"+k.Iface+".timer")
+		fmt.Fprintf(&b, "rm -f /etc/systemd/system/%q /etc/systemd/system/%q /etc/revhub/%q\n",
+			"revhub-kick-"+k.Iface+".service", "revhub-kick-"+k.Iface+".timer", "kick-"+k.Iface+".sh")
+	}
+	if len(kicks) > 0 {
+		b.WriteString("if [ -d /run/systemd/system ]; then systemctl daemon-reload; fi\n")
+	}
 	for _, f := range wgFiles {
 		name := strings.TrimSuffix(f, ".conf")
 		fmt.Fprintf(&b, "wg-quick down %q 2>/dev/null || true\n", name)

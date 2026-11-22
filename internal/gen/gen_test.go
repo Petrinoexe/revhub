@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 
@@ -171,6 +172,76 @@ func TestArtifactsSet(t *testing.T) {
 	}
 }
 
+// Без keepalive обратный туннель будит только дозванивающийся узел: скрипт
+// шлёт один пакет при отсутствии сессии, таймер повторяет это раз в минуту.
+func TestDialerGetsKickInsteadOfKeepalive(t *testing.T) {
+	var st model.State
+	st.Nodes = []model.Node{{ID: "hub", PublicAddr: "194.67.203.189:65423"}, {ID: "exit", PublicAddr: "5.180.31.201:443"}}
+	st.Tunnels = []model.Tunnel{{ID: "tn", Name: "eu", Kind: model.TunnelWGReverse,
+		FromNode: "hub", ToNode: "exit", Enabled: true, Subnet: "10.77.3.0/30",
+		ListenPort: 51820, ForwardPolicy: true,
+		FromKeyPriv: zeroKey, FromKeyPub: zeroKey, ToKeyPriv: zeroKey, ToKeyPub: zeroKey}}
+
+	files, err := Artifacts(st, "exit")
+	if err != nil {
+		t.Fatal(err)
+	}
+	byName := map[string]File{}
+	for _, f := range files {
+		byName[f.Name] = f
+	}
+	kick, ok := byName["kick-wg-eu.sh"]
+	if !ok {
+		t.Fatalf("нет скрипта раскачки, есть: %v", keysOf(byName))
+	}
+	// Пир — слушающая сторона (хаб), её адрес в подсети: 10.77.3.1.
+	if !strings.Contains(kick.Content, "peer=10.77.3.1") || !strings.Contains(kick.Content, "iface=wg-eu") {
+		t.Errorf("скрипт раскачки смотрит не туда:\n%s", kick.Content)
+	}
+	if !strings.Contains(kick.Content, "latest-handshakes") {
+		t.Error("скрипт должен проверять наличие сессии, а не молотить пингом всегда")
+	}
+	if _, ok := byName["revhub-kick-wg-eu.timer"]; !ok {
+		t.Error("нет таймера, сессия не восстановится сама после перезагрузки хаба")
+	}
+	if !strings.Contains(byName["apply.sh"].Content, `systemctl enable --now "revhub-kick-wg-eu.timer"`) {
+		t.Error("apply.sh не включает таймер")
+	}
+	if !strings.Contains(byName["apply.sh"].Content, `/etc/revhub/"kick-wg-eu.sh"`) {
+		t.Error("apply.sh не дёргает раскачку сразу после подъёма")
+	}
+	// На слушающей стороне раскачки быть не должно — она ничего не дозванивает.
+	hubFiles, err := Artifacts(st, "hub")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range hubFiles {
+		if strings.HasPrefix(f.Name, "kick-") {
+			t.Errorf("хабу раскачка не нужна: %s", f.Name)
+		}
+	}
+	// С явным keepalive раскачка не нужна никому.
+	st.Tunnels[0].Keepalive = 25
+	files, err = Artifacts(st, "exit")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range files {
+		if strings.HasPrefix(f.Name, "kick-") {
+			t.Errorf("при keepalive раскачка лишняя: %s", f.Name)
+		}
+	}
+}
+
+func keysOf(m map[string]File) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
 // zeroKey — валидный по форме ключ WireGuard (32 байта в base64).
 const zeroKey = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
 
@@ -283,14 +354,14 @@ func TestNodePortsCoversInboundsAndListeners(t *testing.T) {
 
 // apply.sh открывает порты сам: свежий VPS с ufw иначе «не пускает» клиентов.
 func TestApplyScriptOpensPorts(t *testing.T) {
-	s := applyScript(nil, false, []string{"443/tcp", "51820/udp"}, false)
+	s := applyScript(nil, false, []string{"443/tcp", "51820/udp"}, false, nil)
 	for _, want := range []string{"ufw status", `ufw allow "443/tcp"`, `ufw allow "51820/udp"`, "firewall-cmd --permanent --add-port"} {
 		if !strings.Contains(s, want) {
 			t.Errorf("в apply.sh нет %q", want)
 		}
 	}
 	// без портов — никаких обращений к firewall
-	if s := applyScript(nil, false, nil, false); strings.Contains(s, "ufw") {
+	if s := applyScript(nil, false, nil, false, nil); strings.Contains(s, "ufw") {
 		t.Error("ufw вызывается без портов")
 	}
 }
@@ -303,7 +374,7 @@ func TestApplyRestoresXrayConfigOnFailedRestart(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	write("apply.sh", applyScript(nil, true, []string{"443/tcp"}, false), 0o700)
+	write("apply.sh", applyScript(nil, true, []string{"443/tcp"}, false, nil), 0o700)
 	write("xray.json", "new", 0o600)
 	write("running.json", "old", 0o600)
 	write("systemctl", "#!/bin/sh\n[ \"$*\" = 'restart xray' ] && [ \"$(cat \"$XRAY_CONFIG\")\" = old ]\n", 0o700)
