@@ -51,6 +51,8 @@ func main() {
 		cmdRender(os.Args[2:])
 	case "apply-local":
 		cmdApplyLocal(os.Args[2:])
+	case "repair":
+		cmdRepair(os.Args[2:])
 	case "validate":
 		cmdValidate(os.Args[2:])
 	case "demo":
@@ -81,6 +83,7 @@ func usage() {
   revhub passwd   [--state state.json] [--user admin] [--random --password-file f]
   revhub render   --node <id> [--state state.json] [--out out]
   revhub apply-local [--node <id>] [--state state.json]
+  revhub repair   [--etc-dir /etc/revhub]   # юнит xray, sudo, применение конфига
   revhub validate [--state state.json]
   revhub demo     [--state demo-state.json]
   revhub version

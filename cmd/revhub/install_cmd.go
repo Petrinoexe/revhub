@@ -97,8 +97,10 @@ func printReport(rep *install.Report, asJSON bool) {
 		fmt.Println("артефакты:    ", rep.ArtifactsDir)
 	}
 	fmt.Println()
-	fmt.Println("дальше: systemctl status revhub; конфиг ядра применяется из",
-		filepath.Join(rep.ArtifactsDir, "apply.sh"))
+	fmt.Println("дальше: systemctl status revhub · журнал: journalctl -u revhub -f")
+	if rep.ArtifactsDir != "" {
+		fmt.Println("        конфиг ядра на этой машине уже применён; переприменить: revhub repair")
+	}
 }
 
 // cmdTLS — сертификаты отдельно от установки.

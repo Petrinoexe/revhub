@@ -563,6 +563,197 @@ func TestUnitRunsAsPanelUser(t *testing.T) {
 	}
 }
 
+// Ядро может быть в PATH, а юнита не быть: тогда `systemctl restart xray`
+// падает с «Unit xray.service not found» и установка обрывается.
+func TestEnsureXrayUnitInstallsWhenMissing(t *testing.T) {
+	dir := t.TempDir()
+	units := filepath.Join(dir, "units")
+	o := Options{EtcDir: dir, UnitDir: units, Prefix: filepath.Join(dir, "prefix")}
+	if err := os.MkdirAll(units, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	r := &runner{rep: &Report{}}
+	note, err := r.ensureXrayUnit(o, "/usr/local/bin/xray")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(note, "установлен") {
+		t.Errorf("отчёт: %q", note)
+	}
+	b, err := os.ReadFile(filepath.Join(units, "xray.service"))
+	if err != nil {
+		t.Fatalf("юнит не установлен: %v", err)
+	}
+	if !strings.Contains(string(b), "/usr/local/etc/xray/config.json") {
+		t.Errorf("юнит не читает наш конфиг:\n%s", b)
+	}
+}
+
+// Чужой юнит (3x-ui и подобные) читает другой конфиг: его нельзя оставлять —
+// панель применит файл, а ядро поднимется со старым. Копию сохраняем.
+func TestEnsureXrayUnitReplacesForeignUnitWithBackup(t *testing.T) {
+	dir := t.TempDir()
+	units := filepath.Join(dir, "units")
+	if err := os.MkdirAll(units, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	foreign := "[Service]\nExecStart=/usr/local/x-ui/bin/xray run -config /usr/local/x-ui/bin/config.json\n"
+	if err := os.WriteFile(filepath.Join(units, "xray.service"), []byte(foreign), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	o := Options{EtcDir: dir, UnitDir: units}
+	r := &runner{rep: &Report{}}
+	note, err := r.ensureXrayUnit(o, "/usr/local/bin/xray")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(note, "заменён") || !strings.Contains(note, "revhub-backup") {
+		t.Errorf("отчёт: %q", note)
+	}
+	if b, err := os.ReadFile(filepath.Join(dir, "xray.service.revhub-backup")); err != nil || string(b) != foreign {
+		t.Fatalf("бэкап чужого юнита не сохранён: %v", err)
+	}
+	if b, _ := os.ReadFile(filepath.Join(units, "xray.service")); !strings.Contains(string(b), "/usr/local/etc/xray/config.json") {
+		t.Errorf("новый юнит не установлен:\n%s", b)
+	}
+}
+
+// Полный прогон установки: юнита не было, ядро в PATH — установка обязана сама
+// поставить xray.service, применить конфиг и перезапустить ядро, а не упасть.
+func TestInstallAppliesConfigWithFreshUnit(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("тест для непривилегированного прогона: root идёт другим путём")
+	}
+	dir := t.TempDir()
+	fake := filepath.Join(dir, "fakebin")
+	if err := os.MkdirAll(fake, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	calls := filepath.Join(dir, "calls.log")
+	script := func(body string) {
+		p := filepath.Join(fake, "systemctl")
+		if err := os.WriteFile(p, []byte("#!/bin/sh\necho \"systemctl $*\" >> "+calls+"\n"+body+"\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	script(`case "$*" in
+  "cat xray.service") echo "No files found for xray.service."; exit 1;;
+  "is-active --quiet xray") exit 0;;
+  "is-active xray") echo active; exit 0;;
+esac
+exit 0`)
+	if err := os.WriteFile(filepath.Join(fake, "xray"), []byte("#!/bin/sh\necho 'Configuration OK.'\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", fake+":"+os.Getenv("PATH"))
+	t.Setenv("XRAY_CONFIG", filepath.Join(dir, "etc/xray/config.json"))
+
+	units := filepath.Join(dir, "units")
+	o := Defaults()
+	o.Prefix = filepath.Join(dir, "usr/local")
+	o.EtcDir = filepath.Join(dir, "etc/revhub")
+	o.StateDir = filepath.Join(dir, "var/lib/revhub")
+	o.UnitDir = units
+	o.Mode = TLSNone
+	o.Host = "203.0.113.10"
+	o.PanelOnly = true
+	o.SkipPkgs = true
+	o.PanelUser = "revhub"
+
+	rep, err := Run(o)
+	if err != nil {
+		var steps []string
+		for _, s := range rep.Steps {
+			steps = append(steps, s.Name+": "+s.Detail+" "+s.Err)
+		}
+		t.Fatalf("установка упала: %v\n%s", err, strings.Join(steps, "\n"))
+	}
+	if b, err := os.ReadFile(filepath.Join(units, "xray.service")); err != nil {
+		t.Fatalf("xray.service не установлен: %v", err)
+	} else if !strings.Contains(string(b), "/usr/local/etc/xray/config.json") {
+		t.Errorf("юнит не читает наш конфиг:\n%s", b)
+	}
+	log, _ := os.ReadFile(calls)
+	if !strings.Contains(string(log), "systemctl restart xray") {
+		t.Errorf("ядро не перезапускалось:\n%s", log)
+	}
+}
+
+// Repair (после обновления) в dry-run показывает план и не трогает состояние
+// и сертификаты — их не должно касаться и в реальном прогоне.
+func TestRepairDryRunKeepsState(t *testing.T) {
+	dir := t.TempDir()
+	etc := filepath.Join(dir, "etc/revhub")
+	if err := os.MkdirAll(etc, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	statePath := filepath.Join(etc, "state.json")
+	body := `{"version":1,"nodes":[{"id":"node-1","name":"Хаб","public_addr":"203.0.113.10:443"}],"inbounds":[],"tunnels":[],"routes":[],"clients":[]}`
+	if err := os.WriteFile(statePath, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	units := filepath.Join(dir, "units")
+	if err := os.MkdirAll(units, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	o := Defaults()
+	o.Prefix = filepath.Join(dir, "usr/local")
+	o.EtcDir = etc
+	o.StateDir = filepath.Join(dir, "var/lib/revhub")
+	o.UnitDir = units
+	o.DryRun = true
+
+	rep, err := Repair(o, statePath)
+	if err != nil {
+		t.Fatalf("repair dry-run: %v", err)
+	}
+	if rep.NodeID != "node-1" {
+		t.Errorf("узел = %q", rep.NodeID)
+	}
+	names := map[string]bool{}
+	for _, s := range rep.Steps {
+		names[s.Name] = true
+		if s.Err != "" {
+			t.Errorf("шаг %s упал: %s", s.Name, s.Err)
+		}
+	}
+	for _, want := range []string{"юнит xray", "применение конфига панелью", "артефакты узла", "применение конфига"} {
+		if !names[want] {
+			t.Errorf("нет шага %q", want)
+		}
+	}
+	if b, err := os.ReadFile(statePath); err != nil || string(b) != body {
+		t.Errorf("состояние изменилось: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(etc, "credentials.json")); err == nil {
+		t.Error("repair не должен создавать учётные данные")
+	}
+}
+
+// Свой юнит уже стоит — не трогаем и не плодим бэкапы.
+func TestEnsureXrayUnitKeepsOwnUnit(t *testing.T) {
+	dir := t.TempDir()
+	units := filepath.Join(dir, "units")
+	if err := os.MkdirAll(units, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	own := "[Service]\nExecStart=/usr/local/bin/xray run -config /usr/local/etc/xray/config.json\n"
+	if err := os.WriteFile(filepath.Join(units, "xray.service"), []byte(own), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	r := &runner{rep: &Report{}}
+	note, err := r.ensureXrayUnit(Options{EtcDir: dir, UnitDir: units}, "/usr/local/bin/xray")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(note, "уже читает") {
+		t.Errorf("отчёт: %q", note)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "xray.service.revhub-backup")); err == nil {
+		t.Error("бэкап не должен создаваться для своего юнита")
+	}
+}
+
 // Юнит не должен запрещать sudo: именно им панель применяет конфиг ядра.
 func TestUnitAllowsSudoForApply(t *testing.T) {
 	o := Defaults()

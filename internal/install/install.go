@@ -239,17 +239,14 @@ func Run(o Options) (*Report, error) {
 			return "", err
 		}
 		var made []string
-		if _, err := lookPath("xray"); err != nil {
-			if err := os.WriteFile(filepath.Join(o.EtcDir, "xray.service"),
-				[]byte(xrayUnit(xrayPath)), 0o644); err != nil {
-				return "", err
-			}
-			if err := r.run("install", "-m", "644", filepath.Join(o.EtcDir, "xray.service"),
-				filepath.Join(o.UnitDir, "xray.service")); err != nil {
-				return "", err
-			}
-			made = append(made, "xray.service")
+		// Наличие бинаря в PATH ничего не говорит о systemd: xray мог остаться от
+		// прошлой установки или от другого панельного пакета, а юнита нет. Тогда
+		// `systemctl restart xray` падает с «Unit xray.service not found».
+		detail, err := r.ensureXrayUnit(o, xrayPath)
+		if err != nil {
+			return "", err
 		}
+		made = append(made, detail)
 		unit := filepath.Join(o.EtcDir, "revhub.service")
 		if err := r.run("install", "-m", "644", unit, filepath.Join(o.UnitDir, "revhub.service")); err != nil {
 			return "", err
@@ -292,7 +289,7 @@ func Run(o Options) (*Report, error) {
 		if o.DryRun || o.NoApply || o.NoStart {
 			return "пропущено флагами --dry-run/--no-apply/--no-start", errSkip
 		}
-		out, err := applyArtifacts(rep.ArtifactsDir)
+		out, err := applyArtifacts(rep.ArtifactsDir, o.EtcDir)
 		if err != nil {
 			return out, fmt.Errorf("%w (вывод: %s)", err, out)
 		}
@@ -337,6 +334,109 @@ func Run(o Options) (*Report, error) {
 }
 
 // ---------------------------------------------------------------- TLS
+
+// Repair приводит в порядок системную часть уже стоящей установки, не трогая
+// состояние, TLS и пароль: юнит xray, правило sudo для панели, рендер артефактов
+// и применение конфига. Нужен тем, кто обновляется: обновление меняет только
+// бинарь, а юнит/правило могли остаться от старой версии или отсутствовать.
+func Repair(o Options, statePath string) (*Report, error) {
+	o = withDefaults(o)
+	rep := &Report{AdminUser: o.AdminUser}
+	r := &runner{dry: o.DryRun, rep: rep}
+	if !o.DryRun && os.Geteuid() != 0 {
+		return rep, fmt.Errorf("нужен root: правятся юниты, sudoers и конфиг ядра")
+	}
+
+	nodeID, err := localNodeID(statePath)
+	if err != nil {
+		return rep, err
+	}
+	rep.NodeID = nodeID
+
+	xrayPath := filepath.Join(o.Prefix, "bin", "xray")
+	if p, err := lookXray(o.Prefix); err == nil {
+		xrayPath = p
+	}
+	r.step("юнит xray", func() (string, error) {
+		if err := os.MkdirAll(o.UnitDir, 0o755); err != nil {
+			return "", err
+		}
+		return r.ensureXrayUnit(o, xrayPath)
+	})
+	r.step("применение конфига панелью", func() (string, error) { return r.grantApplyLocal(o) })
+	r.step("артефакты узла", func() (string, error) {
+		st, err := readState(statePath)
+		if err != nil {
+			return "", err
+		}
+		files, err := gen.Artifacts(st, nodeID)
+		if err != nil {
+			return "", err
+		}
+		dir := filepath.Join(o.StateDir, "out", nodeID)
+		man, err := gen.WriteArtifacts(dir, files)
+		if err != nil {
+			return "", err
+		}
+		man.Node = nodeID
+		if err := os.WriteFile(filepath.Join(dir, "manifest.json"), man.JSON(), 0o640); err != nil {
+			return "", err
+		}
+		rep.ArtifactsDir = dir
+		return fmt.Sprintf("%d файла в %s", len(files), dir), nil
+	})
+	if err := r.firstStepError(); err != nil {
+		return rep, err
+	}
+	r.step("применение конфига", func() (string, error) {
+		if o.DryRun {
+			return "пропущено: --dry-run", errSkip
+		}
+		out, err := applyArtifacts(rep.ArtifactsDir, o.EtcDir)
+		if err != nil {
+			return out, fmt.Errorf("%w (вывод: %s)", err, out)
+		}
+		msg := "xray перезапущен с конфигом узла"
+		if out != "" {
+			msg += ": " + strings.ReplaceAll(out, "\n", " · ")
+		}
+		return msg, nil
+	})
+	if err := r.firstStepError(); err != nil {
+		return rep, err
+	}
+	return rep, nil
+}
+
+// localNodeID — id узла, на котором стоит панель. По умолчанию node-1,
+// иначе первый узел состояния.
+func localNodeID(statePath string) (string, error) {
+	st, err := readState(statePath)
+	if err != nil {
+		return "", err
+	}
+	for _, n := range st.Nodes {
+		if n.ID == "node-1" {
+			return n.ID, nil
+		}
+	}
+	if len(st.Nodes) > 0 {
+		return st.Nodes[0].ID, nil
+	}
+	return "", fmt.Errorf("в %s нет ни одного узла — сначала установка", statePath)
+}
+
+func readState(statePath string) (model.State, error) {
+	b, err := os.ReadFile(statePath)
+	if err != nil {
+		return model.State{}, fmt.Errorf("состояние %s: %w", statePath, err)
+	}
+	var st model.State
+	if err := json.Unmarshal(b, &st); err != nil {
+		return model.State{}, fmt.Errorf("состояние %s: %w", statePath, err)
+	}
+	return st, nil
+}
 
 type tlsCfg struct {
 	mode       string
@@ -1217,6 +1317,64 @@ WantedBy=multi-user.target
 `
 }
 
+// xrayConfigPath — путь, который читает наш юнит. По нему же решаем, годится ли
+// уже существующий юнит xray.service.
+const xrayConfigPath = "/usr/local/etc/xray/config.json"
+
+// currentXrayUnit возвращает текст действующего юнита xray: сначала спрашиваем
+// systemd, потом смотрим файлы в стандартных местах (sandbox и нестандартный
+// UnitDir опрашивают файлы).
+func currentXrayUnit(o Options) string {
+	if out, err := exec.Command("systemctl", "cat", "xray.service").CombinedOutput(); err == nil {
+		if txt := strings.TrimSpace(string(out)); txt != "" && !strings.Contains(txt, "No files found") {
+			return txt
+		}
+	}
+	for _, p := range []string{
+		filepath.Join(o.UnitDir, "xray.service"),
+		"/etc/systemd/system/xray.service",
+		"/lib/systemd/system/xray.service",
+		"/usr/lib/systemd/system/xray.service",
+	} {
+		if b, err := os.ReadFile(p); err == nil {
+			return string(b)
+		}
+	}
+	return ""
+}
+
+// ensureXrayUnit делает так, чтобы юнит xray читал наш конфиг:
+//   - юнита нет → ставим свой;
+//   - есть, но конфиг у него другой (3x-ui, x-ui, чужой путь) → сохраняем копию
+//     и ставим свой, иначе панель будет считать, что применила конфиг, а ядро
+//     поднимется с другим;
+//   - есть и уже читает наш путь → не трогаем.
+func (r *runner) ensureXrayUnit(o Options, xrayPath string) (string, error) {
+	cur := currentXrayUnit(o)
+	switch {
+	case strings.Contains(cur, xrayConfigPath):
+		return "xray.service уже читает " + xrayConfigPath, nil
+	case r.dry:
+		return "будет установлен xray.service (" + xrayPath + ")", nil
+	}
+	note := "xray.service установлен"
+	if cur != "" {
+		backup := filepath.Join(o.EtcDir, "xray.service.revhub-backup")
+		if err := os.WriteFile(backup, []byte(cur), 0o644); err != nil {
+			return "", fmt.Errorf("бэкап чужого xray.service: %w", err)
+		}
+		note = "xray.service заменён на revhub-овский, прежний сохранён в " + backup
+	}
+	src := filepath.Join(o.EtcDir, "xray.service")
+	if err := os.WriteFile(src, []byte(xrayUnit(xrayPath)), 0o644); err != nil {
+		return "", err
+	}
+	if err := r.run("install", "-m", "644", src, filepath.Join(o.UnitDir, "xray.service")); err != nil {
+		return "", err
+	}
+	return note, nil
+}
+
 // ---------------------------------------------------------------- мелочи
 
 type runner struct {
@@ -1436,9 +1594,12 @@ func samePath(a, b string) bool {
 // applyArtifacts запускает apply.sh из каталога артефактов. Установщик уже
 // работает от root, поэтому sudo не нужен; PATH задаём явно — под root через
 // sudo/ssh он не всегда содержит /usr/local/bin, где лежит ядро.
-func applyArtifacts(dir string) (string, error) {
+func applyArtifacts(dir, etcDir string) (string, error) {
 	if dir == "" {
 		return "", fmt.Errorf("каталог артефактов не создан")
+	}
+	if etcDir == "" {
+		etcDir = "/etc/revhub"
 	}
 	cmd := exec.Command("bash", "apply.sh")
 	cmd.Dir = dir
@@ -1449,9 +1610,30 @@ func applyArtifacts(dir string) (string, error) {
 			break
 		}
 	}
-	cmd.Env = append(os.Environ(),
-		"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
-		"XRAY_BIN="+xrayBin)
+	// PATH дополняем, а не заменяем: в тестах и в нестандартных сборках ядро
+	// лежит в собственном каталоге, который уже есть в PATH.
+	dirs := []string{"/usr/local/sbin", "/usr/local/bin", "/usr/sbin", "/usr/bin", "/sbin", "/bin"}
+	if cur := os.Getenv("PATH"); cur != "" {
+		dirs = append(strings.Split(cur, ":"), dirs...)
+	}
+	seen := map[string]bool{}
+	uniq := make([]string, 0, len(dirs))
+	for _, d := range dirs {
+		if d == "" || seen[d] {
+			continue
+		}
+		seen[d] = true
+		uniq = append(uniq, d)
+	}
+	// XRAY_CONFIG: по умолчанию боевой путь, но уважаем уже заданный в окружении
+	// (песочница, нестандартная сборка). STATE_DIR — каталог этой установки,
+	// иначе apply.sh писал бы резервную копию в чужой /etc/revhub.
+	cfgPath := os.Getenv("XRAY_CONFIG")
+	if cfgPath == "" {
+		cfgPath = xrayConfigPath
+	}
+	cmd.Env = append(os.Environ(), "PATH="+strings.Join(uniq, ":"), "XRAY_BIN="+xrayBin,
+		"XRAY_CONFIG="+cfgPath, "STATE_DIR="+etcDir)
 	out, err := cmd.CombinedOutput()
 	return strings.TrimSpace(string(out)), err
 }

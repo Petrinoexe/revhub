@@ -21,6 +21,8 @@ type fakeRunner struct {
 	uidOutput *string
 	noWG      bool
 	failOn    string
+	// xrayUnitOwn — на «узле» уже стоит наш юнит xray (читает наш конфиг).
+	xrayUnitOwn bool
 }
 
 func newFakeRunner() *fakeRunner {
@@ -56,6 +58,15 @@ func (f *fakeRunner) Run(cmd string) (string, error) {
 	case strings.HasPrefix(cmd, "command -v xray"):
 		return "/usr/local/bin/xray", nil
 	case strings.HasPrefix(cmd, "test -f /etc/systemd/system/xray.service"):
+		return "", nil
+	case strings.Contains(cmd, "systemctl cat xray.service"):
+		if f.xrayUnitOwn {
+			return "1\n", nil
+		}
+		return "0\n", nil
+	case strings.HasPrefix(cmd, "mkdir -p /etc/revhub && cp -a"):
+		return "", nil
+	case cmd == "systemctl daemon-reload":
 		return "", nil
 	case strings.Contains(cmd, "apt-get install"):
 		return "", nil
@@ -118,6 +129,11 @@ func TestBootstrapFullFlow(t *testing.T) {
 	}
 	if f.modes["/opt/revhub/apply.sh"] != 0o700 {
 		t.Errorf("права apply.sh = %v", f.modes["/opt/revhub/apply.sh"])
+	}
+	// Без своего юнита `systemctl restart xray` на узле падает с
+	// «Unit xray.service not found» — юнит обязан уехать вместе с конфигом.
+	if f.files["/etc/systemd/system/xray.service"] != "unit" {
+		t.Errorf("юнит xray не установлен: %q", f.files["/etc/systemd/system/xray.service"])
 	}
 	applied := false
 	for _, c := range f.cmds {
@@ -285,6 +301,24 @@ func TestBootstrapNoWGWhenNoTunnels(t *testing.T) {
 	}
 	if res.XrayState != "active" {
 		t.Errorf("xray state = %q", res.XrayState)
+	}
+}
+
+// Наш юнит уже стоит: не перезаписываем и не делаем лишний daemon-reload.
+func TestBootstrapKeepsOwnXrayUnit(t *testing.T) {
+	f := newFakeRunner()
+	f.xrayUnitOwn = true
+	res, err := RunWith(openFake(f), sshx.Target{Addr: "127.0.0.1:22"}, planFor(t), nil)
+	if err != nil {
+		t.Fatalf("bootstrap: %v\n%s", err, res.Text())
+	}
+	if _, ok := f.files["/etc/systemd/system/xray.service"]; ok {
+		t.Error("юнит перезаписан без нужды")
+	}
+	for _, c := range f.cmds {
+		if c == "systemctl daemon-reload" {
+			t.Error("лишний daemon-reload")
+		}
 	}
 }
 

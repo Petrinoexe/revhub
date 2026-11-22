@@ -22,6 +22,10 @@ type File struct {
 	Mode os.FileMode
 }
 
+// xrayRemoteConfig — путь конфига, который обязан читать наш юнит xray.service
+// на удалённом узле. По нему проверяем, наш ли там юнит.
+const xrayRemoteConfig = "/usr/local/etc/xray/config.json"
+
 type Plan struct {
 	Artifacts    []gen.File // готовые файлы узла: xray.json, wg-*.conf, apply.sh...
 	Files        []File     // файлы по абсолютным путям (сертификаты)
@@ -200,8 +204,15 @@ func RunWith(open Open, t sshx.Target, p Plan, logf func(string)) (*Result, erro
 
 		if p.XrayUnit != "" {
 			if err := step("юнит xray", func() (string, error) {
-				if _, err := cli.Run("test -f /etc/systemd/system/xray.service"); err == nil {
-					return "уже есть", nil
+				// Наличие бинаря или файла юнита ничего не гарантирует: юнит может
+				// читать чужой конфиг (3x-ui) или отсутствовать. Проверяем, что
+				// служба грузит именно наш путь, иначе ставим свой.
+				out, _ := cli.Run("systemctl cat xray.service 2>/dev/null | grep -c -- '" + xrayRemoteConfig + "' || true")
+				if n := strings.TrimSpace(out); n != "" && n != "0" {
+					return "уже читает " + xrayRemoteConfig, nil
+				}
+				if _, err := cli.Run("mkdir -p /etc/revhub && cp -a /etc/systemd/system/xray.service /etc/revhub/xray.service.revhub-backup 2>/dev/null || true"); err != nil {
+					return "", fmt.Errorf("бэкап прежнего xray.service: %w", err)
 				}
 				if err := cli.Upload("/etc/systemd/system/xray.service", []byte(p.XrayUnit), 0o644); err != nil {
 					return "", err
@@ -209,7 +220,7 @@ func RunWith(open Open, t sshx.Target, p Plan, logf func(string)) (*Result, erro
 				if _, err := cli.Run("systemctl daemon-reload"); err != nil {
 					return "", err
 				}
-				return "создан и daemon-reload", nil
+				return "установлен и daemon-reload (прежний, если был, сохранён в /etc/revhub/xray.service.revhub-backup)", nil
 			}); err != nil {
 				return res, err
 			}
