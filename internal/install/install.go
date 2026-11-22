@@ -333,7 +333,7 @@ func setupTLS(o Options, r *runner) (*tlsCfg, error) {
 		cfg.sni = ip
 		cfg.certFile = filepath.Join(tlsDir, "ip", "fullchain.pem")
 		cfg.keyFile = filepath.Join(tlsDir, "ip", "key.pem")
-		if err := r.acmeIP(ip, o.Email, o.ACMEHTTPPort, o.EtcDir); err != nil {
+		if err := r.acmeIP(o, ip); err != nil {
 			return nil, err
 		}
 		if o.DryRun {
@@ -401,15 +401,19 @@ func setupTLS(o Options, r *runner) (*tlsCfg, error) {
 	return nil, fmt.Errorf("неизвестный режим TLS %q", o.Mode)
 }
 
-// acmeScript ищет acme.sh: домашний каталог текущего пользователя, /root,
-// стандартные места из PATH. Пустая строка — не установлен.
-func acmeScript() string {
-	cands := []string{"/root/.acme.sh/acme.sh", "/usr/local/bin/acme.sh", "/usr/bin/acme.sh"}
-	if home, err := os.UserHomeDir(); err == nil && home != "" {
-		cands = append([]string{filepath.Join(home, ".acme.sh", "acme.sh")}, cands...)
+// acmeScript ищет acme.sh: наш каталог /etc/revhub/acme, домашний каталог
+// пользователя, /root и PATH. Пустая строка — не установлен.
+func acmeScript(etcDir string) string {
+	cands := []string{}
+	if etcDir != "" {
+		cands = append(cands, filepath.Join(etcDir, "acme", "acme.sh"))
 	}
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		cands = append(cands, filepath.Join(home, ".acme.sh", "acme.sh"))
+	}
+	cands = append(cands, "/root/.acme.sh/acme.sh", "/usr/local/bin/acme.sh", "/usr/bin/acme.sh")
 	for _, p := range cands {
-		if st, err := os.Stat(p); err == nil && !st.IsDir() {
+		if st, err := os.Stat(p); err == nil && !st.IsDir() && st.Size() > 0 {
 			return p
 		}
 	}
@@ -419,39 +423,134 @@ func acmeScript() string {
 	return ""
 }
 
-// ensureACME возвращает путь к acme.sh, при необходимости ставя его.
-//
-// Важно: `curl … | sh` без pipefail возвращает код sh, а не curl — неудачная
-// загрузка выглядела как успешная установка, и падало уже на вызове acme.sh
-// с "fork/exec /root/.acme.sh/acme.sh: no such file or directory".
-func (r *runner) ensureACME(email string) (string, error) {
-	if sh := acmeScript(); sh != "" {
+// acmeURLs — откуда берём сам скрипт. get.acme.sh не используем: его лоадер
+// качает acme.sh с raw.githubusercontent и при сбое печатает «Install error»,
+// но завершается с кодом 0 — установка «проходила», а acme.sh не появлялся.
+var acmeURLs = []string{
+	"https://raw.githubusercontent.com/acmesh-official/acme.sh/master/acme.sh",
+	"https://cdn.jsdelivr.net/gh/acmesh-official/acme.sh@master/acme.sh",
+	"https://gitee.com/neilpang/acme.sh/raw/master/acme.sh",
+}
+
+// validACME проверяет, что скачался именно скрипт acme.sh, а не заглушка,
+// captive-portal или HTML-ошибка.
+func validACME(path string) bool {
+	st, err := os.Stat(path)
+	if err != nil || st.IsDir() || st.Size() < 20000 {
+		return false
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return false
+	}
+	txt := string(b)
+	return strings.HasPrefix(txt, "#!") &&
+		strings.Contains(txt, "LE_WORKING_DIR") &&
+		strings.Contains(txt, "acme.sh")
+}
+
+// ensureACME возвращает путь к acme.sh, скачивая его в <EtcDir>/acme при
+// необходимости. Рядом кладём systemd-таймер продления: acme.sh ставит cron
+// через свой installer, а нам нужен предсказуемый путь без cron.
+func (r *runner) ensureACME(o Options) (string, error) {
+	if sh := acmeScript(o.EtcDir); sh != "" {
 		return sh, nil
 	}
+	dst := filepath.Join(o.EtcDir, "acme", "acme.sh")
 	if r.dry {
-		return "/root/.acme.sh/acme.sh", nil
+		return dst, nil
 	}
-	if email == "" {
-		email = "admin@localhost"
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		return "", err
 	}
-	// HOME=/root фиксирует каталог установки, pipefail — ловит сбой curl.
-	if err := runCmd("bash", "-o", "pipefail", "-c",
-		`curl -fsSL --retry 3 https://get.acme.sh | HOME=/root sh -s email=`+email); err != nil {
-		return "", fmt.Errorf("acme.sh не установился: %w. "+
-			"Варианты: поставить вручную (curl https://get.acme.sh | sh) или "+
-			"выбрать TLS «самоподписанный на IP» — он не требует ACME", err)
+	var errs []string
+	for _, u := range acmeURLs {
+		tmp := dst + ".part"
+		if err := runCmd("curl", "-fsSL", "--retry", "3", "--max-time", "120", "-o", tmp, u); err != nil {
+			errs = append(errs, u+": "+err.Error())
+			os.Remove(tmp)
+			continue
+		}
+		if !validACME(tmp) {
+			errs = append(errs, u+": скачался не acme.sh")
+			os.Remove(tmp)
+			continue
+		}
+		if err := os.Rename(tmp, dst); err != nil {
+			return "", err
+		}
+		if err := os.Chmod(dst, 0o755); err != nil {
+			return "", err
+		}
+		r.rep.Steps = append(r.rep.Steps, Step{Name: "  acme.sh", Detail: dst + " ← " + u})
+		break
 	}
-	sh := acmeScript()
+	sh := acmeScript(o.EtcDir)
 	if sh == "" {
-		return "", fmt.Errorf("acme.sh установился, но не найден ни в $HOME/.acme.sh, ни в /root/.acme.sh, ни в PATH")
+		return "", fmt.Errorf("не смог скачать acme.sh (%s). "+
+			"Либо поставь его вручную, либо выбери TLS «самоподписанный на IP» — он не требует ACME",
+			strings.Join(errs, "; "))
+	}
+	if err := r.writeAcmeTimer(o, sh); err != nil {
+		r.rep.Steps = append(r.rep.Steps, Step{Name: "  таймер продления", Err: err.Error()})
 	}
 	return sh, nil
+}
+
+// writeAcmeTimer кладёт юнит и таймер ежедневного продления. Cert-файлы
+// обновляются самим acme.sh (reloadcmd запоминается при --install-cert).
+func (r *runner) writeAcmeTimer(o Options, sh string) error {
+	dir := filepath.Join(o.EtcDir, "acme")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	svc := fmt.Sprintf(`[Unit]
+Description=revhub: продление сертификатов acme.sh
+
+[Service]
+Type=oneshot
+Environment=LE_WORKING_DIR=%s
+ExecStart=%s --cron
+`, dir, sh)
+	timer := `[Unit]
+Description=revhub: ежедневная проверка продления сертификатов
+
+[Timer]
+OnCalendar=*-*-* 03:17:00
+RandomizedDelaySec=3600
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+`
+	for name, body := range map[string]string{
+		"revhub-acme-renew.service": svc,
+		"revhub-acme-renew.timer":   timer,
+	} {
+		src := filepath.Join(dir, name)
+		if err := os.WriteFile(src, []byte(body), 0o644); err != nil {
+			return err
+		}
+		if err := os.MkdirAll(o.UnitDir, 0o755); err != nil {
+			return err
+		}
+		if err := r.run("install", "-m", "644", src, filepath.Join(o.UnitDir, name)); err != nil {
+			return err
+		}
+	}
+	if r.dry || o.UnitDir != "/etc/systemd/system" {
+		return nil
+	}
+	if err := r.run("systemctl", "daemon-reload"); err != nil {
+		return err
+	}
+	return r.run("systemctl", "enable", "--now", "revhub-acme-renew.timer")
 }
 
 // acme выпускает сертификат через acme.sh — тот же путь, что у x-ui.
 func (r *runner) acme(o Options) error {
 	r.rep.Steps = append(r.rep.Steps, Step{Name: "ACME: acme.sh", Detail: "проверяю"})
-	sh, err := r.ensureACME(o.Email)
+	sh, err := r.ensureACME(o)
 	if err != nil {
 		return err
 	}
@@ -509,14 +608,15 @@ func securityForMode(mode string) string {
 
 // acmeIP выпускает сертификат Let's Encrypt на голый IP: LE требует профиль
 // shortlived и допускает только HTTP-01 или TLS-ALPN-01 (DNS-01 для IP нет).
-func (r *runner) acmeIP(ip, email string, port int, etcDir string) error {
+func (r *runner) acmeIP(o Options, ip string) error {
+	port, email := o.ACMEHTTPPort, o.Email
 	if port == 0 {
 		port = 80
 	}
 	if email == "" {
 		email = "admin@" + ip
 	}
-	sh, err := r.ensureACME(email)
+	sh, err := r.ensureACME(o)
 	if err != nil {
 		return err
 	}
@@ -531,7 +631,7 @@ func (r *runner) acmeIP(ip, email string, port int, etcDir string) error {
 		"--server", "letsencrypt", "--certificate-profile", "shortlived", "--days", "6", "--force"); err != nil {
 		return fmt.Errorf("выпуск на %s: %w (порт %d должен быть доступен снаружи)", ip, err, port)
 	}
-	certDir := filepath.Join(etcDir, "tls", "ip")
+	certDir := filepath.Join(o.EtcDir, "tls", "ip")
 	return r.run(sh, "--install-cert", "-d", ip, "--ecc",
 		"--fullchain-file", filepath.Join(certDir, "fullchain.pem"),
 		"--key-file", filepath.Join(certDir, "key.pem"),

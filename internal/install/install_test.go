@@ -261,7 +261,7 @@ func TestAcmeScriptFindsHome(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("HOME", home)
-	if got := acmeScript(); got != sh {
+	if got := acmeScript(""); got != sh {
 		t.Errorf("acmeScript() = %q, ожидал %q", got, sh)
 	}
 }
@@ -271,11 +271,94 @@ func TestAcmeScriptFindsHome(t *testing.T) {
 func TestEnsureACMEDryRunNoNetwork(t *testing.T) {
 	t.Setenv("HOME", t.TempDir()) // гарантируем, что acme.sh не найдётся
 	r := &runner{dry: true, rep: &Report{}}
-	sh, err := r.ensureACME("admin@example.com")
+	sh, err := r.ensureACME(Options{EtcDir: t.TempDir(), UnitDir: t.TempDir()})
 	if err != nil {
 		t.Fatalf("dry-run не должен падать: %v", err)
 	}
 	if sh == "" {
 		t.Error("dry-run должен вернуть путь к acme.sh по умолчанию")
+	}
+}
+
+// Заглушка, HTML-ошибка или обрезанный файл не должны считаться acme.sh.
+func TestValidACME(t *testing.T) {
+	dir := t.TempDir()
+	good := filepath.Join(dir, "good.sh")
+	body := "#!/usr/bin/env sh\n# LE_WORKING_DIR acme.sh\n" + strings.Repeat("# pad\n", 5000)
+	if err := os.WriteFile(good, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if !validACME(good) {
+		t.Error("настоящий acme.sh не распознан")
+	}
+	small := filepath.Join(dir, "small.sh")
+	os.WriteFile(small, []byte("#!/bin/sh\nLE_WORKING_DIR acme.sh\n"), 0o644)
+	if validACME(small) {
+		t.Error("обрезанный файл принят за acme.sh")
+	}
+	html := filepath.Join(dir, "err.html")
+	os.WriteFile(html, []byte("<html>"+strings.Repeat("x", 30000)+"</html>"), 0o644)
+	if validACME(html) {
+		t.Error("HTML принят за acme.sh")
+	}
+	if validACME(filepath.Join(dir, "nope")) {
+		t.Error("несуществующий файл принят за acme.sh")
+	}
+}
+
+// Продление должно жить в своих юнитах: у acme.sh свой cron, а нам нужен
+// предсказуемый путь и корректный LE_WORKING_DIR.
+func TestAcmeTimerRendered(t *testing.T) {
+	dir := t.TempDir()
+	unitDir := t.TempDir()
+	o := Options{EtcDir: dir, UnitDir: unitDir}
+	sh := filepath.Join(dir, "acme", "acme.sh")
+	r := &runner{dry: true, rep: &Report{}}
+	if err := r.writeAcmeTimer(o, sh); err != nil {
+		t.Fatalf("таймер: %v", err)
+	}
+	// в dry-run «install» не выполняется: файлы остаются в <EtcDir>/acme
+	svc, err := os.ReadFile(filepath.Join(dir, "acme", "revhub-acme-renew.service"))
+	if err != nil {
+		t.Fatalf("нет service: %v", err)
+	}
+	if !strings.Contains(string(svc), "LE_WORKING_DIR="+filepath.Join(dir, "acme")) {
+		t.Errorf("в service нет LE_WORKING_DIR: %s", svc)
+	}
+	if !strings.Contains(string(svc), sh+" --cron") {
+		t.Errorf("в service неверный ExecStart: %s", svc)
+	}
+	tm, err := os.ReadFile(filepath.Join(dir, "acme", "revhub-acme-renew.timer"))
+	if err != nil {
+		t.Fatalf("нет timer: %v", err)
+	}
+	if !strings.Contains(string(tm), "OnCalendar=") || !strings.Contains(string(tm), "Persistent=true") {
+		t.Errorf("таймер неполный: %s", tm)
+	}
+}
+
+// Реальная загрузка acme.sh: по умолчанию пропускается, включается
+// REVHUB_NET_TESTS=1 (нужна сеть).
+func TestEnsureACMEDownloads(t *testing.T) {
+	if os.Getenv("REVHUB_NET_TESTS") == "" {
+		t.Skip("нужна сеть: REVHUB_NET_TESTS=1 go test ./internal/install/ -run Downloads")
+	}
+	dir := t.TempDir()
+	o := Options{EtcDir: dir, UnitDir: filepath.Join(dir, "units")}
+	r := &runner{rep: &Report{}}
+	sh, err := r.ensureACME(o)
+	if err != nil {
+		t.Fatalf("скачивание acme.sh: %v", err)
+	}
+	if !validACME(sh) {
+		t.Errorf("скачанное не похоже на acme.sh: %s", sh)
+	}
+	if st, err := os.Stat(sh); err != nil || st.Size() < 100000 {
+		t.Errorf("acme.sh подозрительно мал: %v", err)
+	}
+	for _, f := range []string{"revhub-acme-renew.service", "revhub-acme-renew.timer"} {
+		if _, err := os.Stat(filepath.Join(dir, "acme", f)); err != nil {
+			t.Errorf("нет %s: %v", f, err)
+		}
 	}
 }
