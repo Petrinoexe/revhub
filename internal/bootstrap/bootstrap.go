@@ -119,15 +119,32 @@ func RunWith(open Open, t sshx.Target, p Plan, logf func(string)) (*Result, erro
 	res.HostKey = cli.HostKey()
 
 	if err := step("ssh", func() (string, error) {
-		out, err := cli.Run("id -u; uname -m; . /etc/os-release && echo $PRETTY_NAME")
+		out, err := cli.Run("uid=$(id -u) || exit 1; printf '\\n__REVHUB_UID__=%s\\n' \"$uid\"")
 		if err != nil {
-			return "", err
+			return "", fmt.Errorf("не удалось проверить UID по SSH: %w", err)
 		}
-		lines := strings.Split(strings.TrimSpace(out), "\n")
-		if len(lines) > 0 && lines[0] != "0" {
-			return "", fmt.Errorf("нужен root (uid=%s)", lines[0])
+		uid := ""
+		for _, line := range strings.Split(out, "\n") {
+			line = strings.TrimSpace(line)
+			if strings.HasPrefix(line, "__REVHUB_UID__=") {
+				if uid != "" {
+					return "", fmt.Errorf("проверка UID: несколько результатов")
+				}
+				uid = strings.TrimPrefix(line, "__REVHUB_UID__=")
+			}
 		}
-		return strings.Join(lines[1:], ", "), nil
+		if uid == "" {
+			return "", fmt.Errorf("не удалось определить UID удалённого пользователя: id -u не вернул ожидаемый результат")
+		}
+		for _, c := range uid {
+			if c < '0' || c > '9' {
+				return "", fmt.Errorf("проверка UID: некорректный ответ %q", uid)
+			}
+		}
+		if uid != "0" {
+			return "", fmt.Errorf("нужен root на удалённом узле (uid=%s)", uid)
+		}
+		return "проверка root: uid=0", nil
 	}); err != nil {
 		return res, err
 	}

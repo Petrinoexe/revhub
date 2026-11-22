@@ -30,8 +30,8 @@ func (f *fakeNode) Upload(p string, d []byte, m os.FileMode) error {
 func (f *fakeNode) Run(cmd string) (string, error) {
 	f.cmds = append(f.cmds, cmd)
 	switch {
-	case strings.HasPrefix(cmd, "id -u"):
-		return f.uid + "\nx86_64\nDebian 12\n", nil
+	case strings.HasPrefix(cmd, "uid=$(id -u)"):
+		return "__REVHUB_UID__=" + f.uid + "\n", nil
 	case strings.HasPrefix(cmd, "command -v "):
 		return "/usr/bin/x", nil
 	case strings.HasPrefix(cmd, "test -s /etc/revhub/tls/fullchain"):

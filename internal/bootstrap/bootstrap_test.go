@@ -14,12 +14,13 @@ import (
 // fakeRunner — «узел» в памяти: записывает команды и файлы, отвечает по
 // шаблонам. Сценарий установки проверяется без SSH-сервера.
 type fakeRunner struct {
-	cmds   []string
-	files  map[string]string
-	modes  map[string]os.FileMode
-	uid    string
-	noWG   bool
-	failOn string
+	cmds      []string
+	files     map[string]string
+	modes     map[string]os.FileMode
+	uid       string
+	uidOutput *string
+	noWG      bool
+	failOn    string
 }
 
 func newFakeRunner() *fakeRunner {
@@ -40,8 +41,11 @@ func (f *fakeRunner) Run(cmd string) (string, error) {
 		return "boom", fmt.Errorf("команда упала")
 	}
 	switch {
-	case strings.HasPrefix(cmd, "id -u;"):
-		return f.uid + "\nx86_64\nDebian GNU/Linux 12 (bookworm)\n", nil
+	case strings.HasPrefix(cmd, "uid=$(id -u)"):
+		if f.uidOutput != nil {
+			return *f.uidOutput, nil
+		}
+		return "__REVHUB_UID__=" + f.uid + "\n", nil
 	case strings.HasPrefix(cmd, "command -v wg-quick"):
 		if f.noWG {
 			return "", fmt.Errorf("не найдено")
@@ -120,6 +124,29 @@ func TestBootstrapFullFlow(t *testing.T) {
 	}
 	if !applied {
 		t.Error("apply.sh не выполнялся")
+	}
+}
+
+func TestBootstrapUIDWithBanner(t *testing.T) {
+	f := newFakeRunner()
+	banner := "\nWelcome to the server\n__REVHUB_UID__=0\n"
+	f.uidOutput = &banner
+	res, err := RunWith(openFake(f), sshx.Target{Addr: "x", User: "root"}, planFor(t), nil)
+	if err != nil {
+		t.Fatalf("root с приветствием: %v\n%s", err, res.Text())
+	}
+}
+
+func TestBootstrapUIDMissing(t *testing.T) {
+	f := newFakeRunner()
+	empty := "\n"
+	f.uidOutput = &empty
+	_, err := RunWith(openFake(f), sshx.Target{Addr: "x", User: "root"}, planFor(t), nil)
+	if err == nil || !strings.Contains(err.Error(), "не удалось определить UID") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(f.files) != 0 {
+		t.Fatal("files uploaded without UID validation")
 	}
 }
 
