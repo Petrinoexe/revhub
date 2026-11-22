@@ -35,6 +35,7 @@ func cmdInstall(args []string) {
 	fs.IntVar(&o.ACMEHTTPPort, "acme-http-port", 80, "порт для HTTP-01 (нужен свободный и доступный извне)")
 	fs.StringVar(&o.AdminUser, "user", o.AdminUser, "админ панели")
 	fs.StringVar(&o.UnitDir, "unit-dir", o.UnitDir, "куда класть systemd-юниты")
+	fs.StringVar(&o.PanelUser, "panel-user", o.PanelUser, "системный пользователь панели (по умолчанию revhub)")
 	fs.BoolVar(&o.PanelOnly, "panel-only", o.PanelOnly, "не создавать инбаунд, клиента и правила (по умолчанию)")
 	withInbound := fs.Bool("with-inbound", false, "создать стартовый VLESS-инбаунд и одного клиента")
 	fs.BoolVar(&o.DryRun, "dry-run", false, "файлы писать, системные команды не выполнять")

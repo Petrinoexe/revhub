@@ -20,6 +20,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"os/user"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -62,6 +63,7 @@ type Options struct {
 	OutDir       string
 	UnitDir      string // куда класть юниты (по умолчанию /etc/systemd/system)
 	PanelOnly    bool   // только панель: без инбаунда, клиентов и правил
+	PanelUser    string // системный пользователь, от которого работает панель
 	DryRun       bool   // не выполнять системные команды, но файлы писать
 	NoStart      bool
 	NoApply      bool
@@ -95,6 +97,7 @@ func Defaults() Options {
 		Prefix: "/usr/local", EtcDir: "/etc/revhub", StateDir: "/var/lib/revhub",
 		PanelAddr: "127.0.0.1:2096", Mode: TLSIP, ACME: "http",
 		Port: 443, AdminUser: "admin", UnitDir: "/etc/systemd/system", PanelOnly: true,
+		PanelUser: "revhub",
 	}
 }
 
@@ -120,7 +123,16 @@ func Run(o Options) (*Report, error) {
 		return fmt.Sprintf("%s, %s, %s", o.EtcDir, o.StateDir, filepath.Join(o.Prefix, "bin")), nil
 	})
 
-	// 2. бинарь панели
+	// 2. пользователь панели и права: сервис не работает от root
+	r.step("пользователь панели", func() (string, error) {
+		out, err := r.ensurePanelUser(o)
+		if err == errSkip {
+			o.PanelUser = "" // юнит не должен ссылаться на несуществующего пользователя
+		}
+		return out, err
+	})
+
+	// 3. бинарь панели
 	r.step("бинарь revhub", func() (string, error) {
 		self, err := os.Executable()
 		if err != nil {
@@ -188,7 +200,10 @@ func Run(o Options) (*Report, error) {
 		return rep, err
 	}
 
-	// 7. юниты
+	// 7. права: файлы уже созданы, выдаём панели ровно нужное
+	r.step("права панели", func() (string, error) { return r.grantPanelAccess(o) })
+
+	// 8. юниты
 	r.step("systemd-юниты", func() (string, error) {
 		if err := os.MkdirAll(o.UnitDir, 0o755); err != nil {
 			return "", err
@@ -578,7 +593,145 @@ func (r *runner) acme(o Options) error {
 		r.rep.Steps = append(r.rep.Steps, Step{Name: "  выпуск",
 			Detail: "сертификат уже выпущен, acme.sh пропустил обновление"})
 	}
-	return r.installCert(sh, o.Domain, filepath.Join(o.EtcDir, "tls"))
+	return r.installCert(o, sh, o.Domain, filepath.Join(o.EtcDir, "tls"))
+}
+
+// ---------------------------------------------------------------- права панели
+
+// ensurePanelUser создаёт системного пользователя панели: сервис не должен
+// работать от root — он держит SSH-креды ко всей сети.
+func (r *runner) ensurePanelUser(o Options) (string, error) {
+	if o.PanelUser == "" || o.PanelUser == "root" {
+		return "панель от root (PanelUser не задан)", nil
+	}
+	if r.dry {
+		return "будет создан пользователь " + o.PanelUser, nil
+	}
+	if os.Geteuid() != 0 {
+		return "пропущено: нужен root, чтобы создать системного пользователя", errSkip
+	}
+	if _, err := lookPath("useradd"); err != nil {
+		return "", fmt.Errorf("нет useradd: создай пользователя %s вручную", o.PanelUser)
+	}
+	if err := runCmd("id", "-u", o.PanelUser); err == nil {
+		return "пользователь " + o.PanelUser + " уже есть", nil
+	}
+	if err := runCmd("useradd", "--system", "--no-create-home",
+		"--home-dir", o.StateDir, "--shell", "/usr/sbin/nologin", o.PanelUser); err != nil {
+		return "", err
+	}
+	return "создан системный пользователь " + o.PanelUser, nil
+}
+
+// panelIDs возвращает uid/gid пользователя панели.
+func panelIDs(name string) (int, int, bool) {
+	u, err := user.Lookup(name)
+	if err != nil {
+		return 0, 0, false
+	}
+	uid, _ := strconv.Atoi(u.Uid)
+	gid, _ := strconv.Atoi(u.Gid)
+	return uid, gid, true
+}
+
+// grantPanelAccess выдаёт панели ровно то, что ей нужно: свой каталог состояния
+// и групповой доступ к /etc/revhub (там state.json, secrets.json и сертификаты).
+func (r *runner) grantPanelAccess(o Options) (string, error) {
+	if o.PanelUser == "" || o.PanelUser == "root" {
+		return "права не меняются: панель от root", nil
+	}
+	if r.dry {
+		return "будут выставлены права для " + o.PanelUser, nil
+	}
+	if os.Geteuid() != 0 {
+		return "пропущено: нужен root, чтобы менять владельцев", errSkip
+	}
+	uid, gid, ok := panelIDs(o.PanelUser)
+	if !ok {
+		return "", fmt.Errorf("пользователь %s не найден", o.PanelUser)
+	}
+	// /etc/revhub: каталог writable группой (панель пишет состояние атомарно),
+	// сами файлы — 0660 root:панель.
+	if err := os.Chown(o.EtcDir, 0, gid); err != nil {
+		return "", err
+	}
+	if err := os.Chmod(o.EtcDir, 0o770); err != nil {
+		return "", err
+	}
+	for _, name := range []string{"state.json", "credentials.json", "secrets.json"} {
+		f := filepath.Join(o.EtcDir, name)
+		if _, err := os.Stat(f); err != nil {
+			continue
+		}
+		_ = os.Chown(f, 0, gid)
+		_ = os.Chmod(f, 0o660)
+	}
+	// /var/lib/revhub — целиком панели (артефакты рендера)
+	for _, d := range []string{o.StateDir, filepath.Join(o.StateDir, "out")} {
+		if _, err := os.Stat(d); err == nil {
+			_ = os.Chown(d, uid, gid)
+			_ = os.Chmod(d, 0o750)
+		}
+	}
+	// сертификаты: каталоги — группе, ключи — 0640, цепочки — 0644
+	tlsDir := filepath.Join(o.EtcDir, "tls")
+	_ = filepath.Walk(tlsDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil || info == nil {
+			return nil
+		}
+		if info.IsDir() {
+			_ = os.Chown(path, 0, gid)
+			_ = os.Chmod(path, 0o750)
+			return nil
+		}
+		_ = os.Chown(path, 0, gid)
+		if strings.HasSuffix(path, ".key") || filepath.Base(path) == "key.pem" {
+			_ = os.Chmod(path, 0o640)
+		} else {
+			_ = os.Chmod(path, 0o644)
+		}
+		return nil
+	})
+	// первый пароль читает админ, панели он не нужен
+	if f := filepath.Join(o.EtcDir, "initial-password"); func() bool {
+		_, err := os.Stat(f)
+		return err == nil
+	}() {
+		_ = os.Chown(f, 0, gid)
+		_ = os.Chmod(f, 0o640)
+	}
+	return fmt.Sprintf("%s: %s, %s", o.PanelUser, o.EtcDir, o.StateDir), nil
+}
+
+// fixCertPerms делает сертификат читаемым для панели, а ключ — только группе.
+func (r *runner) fixCertPerms(o Options, certFile, keyFile string) {
+	if r.dry {
+		return
+	}
+	_, gid, ok := panelIDs(o.PanelUser)
+	if os.Geteuid() != 0 || !ok {
+		_ = os.Chmod(keyFile, 0o600)
+		_ = os.Chmod(certFile, 0o644)
+		return
+	}
+	_ = os.Chown(certFile, 0, gid)
+	_ = os.Chmod(certFile, 0o644)
+	_ = os.Chown(keyFile, 0, gid)
+	_ = os.Chmod(keyFile, 0o640)
+}
+
+// acmeReloadCmd — что acme.sh выполнит после установки/продления сертификата.
+// Продление идёт от root, поэтому права на новые файлы выставляем здесь же.
+func acmeReloadCmd(o Options) string {
+	grp := o.PanelUser
+	if grp == "" {
+		grp = "root"
+	}
+	tls := filepath.Join(o.EtcDir, "tls")
+	return fmt.Sprintf("chgrp -R %s %s 2>/dev/null; chmod -R g+rX %s 2>/dev/null; "+
+		"chmod 0640 %s/key.pem %s/ip/key.pem %s/server.key 2>/dev/null; "+
+		"systemctl try-restart xray || true; systemctl try-restart revhub || true",
+		grp, tls, tls, tls, tls, tls)
 }
 
 // installCert раскладывает выпущенный сертификат по путям панели.
@@ -588,7 +741,7 @@ func (r *runner) acme(o Options) error {
 //  2. при падении --reloadcmd acme.sh возвращает ненулевой код, хотя файлы уже
 //     скопированы (юнитов ещё нет на шаге TLS). Поэтому код возврата не
 //     считаем приговором: проверяем, что файлы на месте и непустые.
-func (r *runner) installCert(sh, domain, certDir string) error {
+func (r *runner) installCert(o Options, sh, domain, certDir string) error {
 	if err := os.MkdirAll(certDir, 0o755); err != nil {
 		return fmt.Errorf("каталог для сертификата %s: %w", certDir, err)
 	}
@@ -597,7 +750,7 @@ func (r *runner) installCert(sh, domain, certDir string) error {
 	err := r.run(sh, "--install-cert", "--force", "-d", domain, "--ecc",
 		"--fullchain-file", certFile,
 		"--key-file", keyFile,
-		"--reloadcmd", "systemctl try-restart xray || true; systemctl try-restart revhub || true")
+		"--reloadcmd", acmeReloadCmd(o))
 	if r.dry {
 		return nil
 	}
@@ -607,9 +760,7 @@ func (r *runner) installCert(sh, domain, certDir string) error {
 		}
 		return verr
 	}
-	// ключ читает только root, сертификат — все
-	_ = os.Chmod(keyFile, 0o600)
-	_ = os.Chmod(certFile, 0o644)
+	r.fixCertPerms(o, certFile, keyFile)
 	if err != nil {
 		r.rep.Steps = append(r.rep.Steps, Step{Name: "  reloadcmd",
 			Detail: "acme.sh вернул ошибку, но сертификат на месте: " + err.Error()})
@@ -700,7 +851,7 @@ func (r *runner) acmeIP(o Options, ip string) error {
 		r.rep.Steps = append(r.rep.Steps, Step{Name: "  выпуск",
 			Detail: "сертификат уже выпущен, acme.sh пропустил обновление"})
 	}
-	return r.installCert(sh, ip, filepath.Join(o.EtcDir, "tls", "ip"))
+	return r.installCert(o, sh, ip, filepath.Join(o.EtcDir, "tls", "ip"))
 }
 
 // ---------------------------------------------------------------- состояние
@@ -830,7 +981,7 @@ func writeState(o Options, cfg *tlsCfg, rep *Report) (model.State, error) {
 			rep.Password = pw
 		}
 		rep.Steps = append(rep.Steps, Step{Name: "админ панели",
-			Detail: fmt.Sprintf("пользователь %s, пароль в %s (0600)", o.AdminUser, pf)})
+			Detail: fmt.Sprintf("пользователь %s, пароль в %s", o.AdminUser, pf)})
 	}
 	return st, nil
 }
@@ -854,6 +1005,12 @@ func revhubUnit(o Options, xrayPath string) string {
 				filepath.Join(o.EtcDir, "tls", "ip", "key.pem"))
 		}
 	}
+	// пустой PanelUser = пользователя нет (не-root прогон): строки User=/Group=
+	// не выводим вовсе, иначе systemd отвергнет юнит с пустым значением
+	userBlock := ""
+	if o.PanelUser != "" && o.PanelUser != "root" {
+		userBlock = fmt.Sprintf("User=%s\nGroup=%s\nUMask=0027\n", o.PanelUser, o.PanelUser)
+	}
 	return fmt.Sprintf(`[Unit]
 Description=revhub — панель туннелей
 Documentation=file://%[1]s
@@ -862,20 +1019,26 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=%[2]s serve --state %[3]s --out %[4]s --addr %[5]s%[6]s
+%[8]sExecStart=%[2]s serve --state %[3]s --out %[4]s --addr %[5]s%[6]s
 Restart=on-failure
 RestartSec=3
 StateDirectory=revhub
+StateDirectoryMode=0750
 NoNewPrivileges=true
 PrivateTmp=true
-ProtectHome=true
-ProtectSystem=full
-ReadWritePaths=%[3]s %[4]s
+ProtectHome=read-only
+ProtectSystem=strict
+# каталоги, а не файлы: панель пишет состояние через временный файл рядом
+ReadWritePaths=%[1]s %[7]s
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+LockPersonality=true
 
 [Install]
 WantedBy=multi-user.target
 `, o.EtcDir, filepath.Join(o.Prefix, "bin", "revhub"), filepath.Join(o.EtcDir, "state.json"),
-		filepath.Join(o.StateDir, "out"), o.PanelAddr, tls)
+		filepath.Join(o.StateDir, "out"), o.PanelAddr, tls, o.StateDir, userBlock)
 }
 
 func xrayUnit(xrayPath string) string {
@@ -953,6 +1116,9 @@ func withDefaults(o Options) Options {
 	}
 	if o.UnitDir == "" {
 		o.UnitDir = d.UnitDir
+	}
+	if o.PanelUser == "" {
+		o.PanelUser = d.PanelUser
 	}
 	return o
 }

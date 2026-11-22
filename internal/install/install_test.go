@@ -368,7 +368,8 @@ func TestInstallCertCreatesDir(t *testing.T) {
 	dir := t.TempDir()
 	r := &runner{dry: true, rep: &Report{}}
 	certDir := filepath.Join(dir, "tls", "ip") // ещё не существует
-	if err := r.installCert("/bin/true", "203.0.113.7", certDir); err != nil {
+	o := Options{EtcDir: dir, PanelUser: "revhub"}
+	if err := r.installCert(o, "/bin/true", "203.0.113.7", certDir); err != nil {
 		t.Fatalf("installCert: %v", err)
 	}
 	if st, err := os.Stat(certDir); err != nil || !st.IsDir() {
@@ -500,5 +501,80 @@ func TestAcmeSkipExitCodes(t *testing.T) {
 	}
 	if acmeSkipExit(nil) {
 		t.Error("nil не ошибка и не skip")
+	}
+}
+
+// Сервис панели не должен работать от root, а ReadWritePaths обязан указывать
+// каталоги: с путём к state.json панель не может создать временный файл рядом
+// (ProtectSystem=full делал /etc read-only) — это и был баг с созданием узла.
+func TestUnitRunsAsPanelUser(t *testing.T) {
+	o := Defaults()
+	o.EtcDir, o.StateDir, o.Prefix = "/etc/revhub", "/var/lib/revhub", "/usr/local"
+	o.PanelAddr, o.Mode, o.PanelTLS = "0.0.0.0:2096", TLSIP, true
+	u := revhubUnit(o, "")
+
+	for _, want := range []string{
+		"User=revhub", "Group=revhub", "UMask=0027",
+		"ProtectSystem=strict", "StateDirectoryMode=0750",
+		"ReadWritePaths=/etc/revhub /var/lib/revhub",
+		"AmbientCapabilities=CAP_NET_BIND_SERVICE",
+	} {
+		if !strings.Contains(u, want) {
+			t.Errorf("в юните нет %q", want)
+		}
+	}
+	for _, bad := range []string{"User=root", "ReadWritePaths=/etc/revhub/state.json", "ProtectSystem=full"} {
+		if strings.Contains(u, bad) {
+			t.Errorf("в юните осталось %q", bad)
+		}
+	}
+}
+
+// В dry-run пользователя не создаём, но отчёт должен быть внятным.
+func TestEnsurePanelUserDry(t *testing.T) {
+	r := &runner{dry: true, rep: &Report{}}
+	got, err := r.ensurePanelUser(Options{PanelUser: "revhub", StateDir: "/var/lib/revhub"})
+	if err != nil {
+		t.Fatalf("dry-run: %v", err)
+	}
+	if !strings.Contains(got, "revhub") {
+		t.Errorf("отчёт: %q", got)
+	}
+}
+
+// Без root владельцев не меняем: шаг пропускается, а не падает.
+func TestGrantPanelAccessNotRoot(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("тест для непривилегированного запуска")
+	}
+	r := &runner{rep: &Report{}}
+	_, err := r.grantPanelAccess(Options{EtcDir: t.TempDir(), StateDir: t.TempDir(), PanelUser: "revhub"})
+	if err != errSkip {
+		t.Errorf("ожидался пропуск шага, получено %v", err)
+	}
+}
+
+// Продление сертификата идёт от root: reloadcmd должен вернуть права группе,
+// иначе панель перестанет читать обновлённый ключ.
+func TestAcmeReloadCmdFixesPerms(t *testing.T) {
+	cmd := acmeReloadCmd(Options{EtcDir: "/etc/revhub", PanelUser: "revhub"})
+	for _, want := range []string{"chgrp -R revhub /etc/revhub/tls", "chmod 0640 /etc/revhub/tls/key.pem", "systemctl try-restart revhub"} {
+		if !strings.Contains(cmd, want) {
+			t.Errorf("в reloadcmd нет %q: %s", want, cmd)
+		}
+	}
+}
+
+// Без пользователя (не-root прогон) юнит не должен содержать пустых User=/Group=
+func TestUnitWithoutPanelUser(t *testing.T) {
+	o := Defaults()
+	o.EtcDir, o.StateDir = "/etc/revhub", "/var/lib/revhub"
+	o.PanelUser = ""
+	u := revhubUnit(o, "")
+	if strings.Contains(u, "User=") || strings.Contains(u, "Group=") {
+		t.Errorf("в юните пустой User=/Group=:\n%s", u)
+	}
+	if !strings.Contains(u, "ExecStart=") {
+		t.Error("юнит без ExecStart")
 	}
 }

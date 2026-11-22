@@ -16,6 +16,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/user"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -122,6 +123,17 @@ func (c *Credentials) save(statePath string) error {
 	tmp.Close()
 	if err := os.Chmod(name, 0o600); err != nil {
 		return err
+	}
+
+	// панель работает отдельным пользователем: группе нужен доступ на чтение
+	// (passwd запускают от root, и без этого панель перестаёт видеть креды)
+	if os.Geteuid() == 0 {
+		if gr, err := user.LookupGroup("revhub"); err == nil {
+			if gid, err := strconv.Atoi(gr.Gid); err == nil {
+				_ = os.Chown(name, 0, gid)
+				_ = os.Chmod(name, 0o640)
+			}
+		}
 	}
 	return os.Rename(name, p)
 }
