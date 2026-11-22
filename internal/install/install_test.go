@@ -566,6 +566,57 @@ func TestAcmeReloadCmdFixesPerms(t *testing.T) {
 }
 
 // Без пользователя (не-root прогон) юнит не должен содержать пустых User=/Group=
+func TestReinstallBackupFailureStopsBeforeReset(t *testing.T) {
+	dir := t.TempDir()
+	o := Defaults()
+	o.EtcDir, o.StateDir, o.Prefix, o.UnitDir = filepath.Join(dir, "etc"), filepath.Join(dir, "state"), filepath.Join(dir, "usr"), filepath.Join(dir, "units")
+	o.Host, o.Mode, o.Reinstall = "203.0.113.5", TLSIP, true
+	o.NoStart, o.NoApply, o.SkipPkgs = true, true, true
+	if err := os.MkdirAll(filepath.Join(o.EtcDir, "credentials.json"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	state := filepath.Join(o.EtcDir, "state.json")
+	if err := os.WriteFile(state, []byte("original"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Run(o); err == nil || !strings.Contains(err.Error(), "бэкап") {
+		t.Fatalf("expected backup error, got %v", err)
+	}
+	got, err := os.ReadFile(state)
+	if err != nil || string(got) != "original" {
+		t.Fatalf("original state changed: %q %v", got, err)
+	}
+}
+
+func TestReinstallBacksUpOldBinaryAndUnit(t *testing.T) {
+	dir := t.TempDir()
+	o := Defaults()
+	o.EtcDir, o.StateDir, o.Prefix, o.UnitDir = filepath.Join(dir, "etc"), filepath.Join(dir, "state"), filepath.Join(dir, "usr"), filepath.Join(dir, "units")
+	for _, p := range []string{o.EtcDir, filepath.Join(o.Prefix, "bin"), o.UnitDir} {
+		if err := os.MkdirAll(p, 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for p, content := range map[string]string{filepath.Join(o.EtcDir, "state.json"): "state", filepath.Join(o.Prefix, "bin", "revhub"): "oldbinary", filepath.Join(o.UnitDir, "revhub.service"): "oldunit"} {
+		if err := os.WriteFile(p, []byte(content), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	r := &runner{rep: &Report{}}
+	if _, err := r.resetInstall(o); err != nil {
+		t.Fatal(err)
+	}
+	matches, _ := filepath.Glob(filepath.Join(o.EtcDir, "backup-*"))
+	if len(matches) != 1 {
+		t.Fatalf("backups: %v", matches)
+	}
+	for _, f := range []string{"revhub", "revhub.service", "state.json"} {
+		if _, err := os.Stat(filepath.Join(matches[0], f)); err != nil {
+			t.Errorf("missing %s: %v", f, err)
+		}
+	}
+}
+
 func TestUnitWithoutPanelUser(t *testing.T) {
 	o := Defaults()
 	o.EtcDir, o.StateDir = "/etc/revhub", "/var/lib/revhub"

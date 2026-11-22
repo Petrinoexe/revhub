@@ -76,6 +76,10 @@ say "каталоги: $PREFIX/bin, $ETCDIR, $STATEDIR"
 
 # ------------------------------------------------------------------ вопросы
 
+STEP=0
+TOTAL=4
+sec() { STEP=$((STEP + 1)); hdr "$STEP/$TOTAL $*"; }
+
 # ask «вопрос» «значение по умолчанию» → ответ в stdout (приглашение в stderr)
 ask() {
   local prompt="$1" def="${2:-}" ans=""
@@ -85,7 +89,21 @@ ask() {
   printf '%s' "${ans:-$def}"
 }
 
-hdr "1/5 адрес машины"
+REINSTALL=0
+if [ -f "$ETCDIR/state.json" ] || [ -f "$ETCDIR/credentials.json" ] || [ -f "$ETCDIR/revhub.service" ]; then
+  TOTAL=5
+  sec "панель уже установлена"
+  say "  найдено: $ETCDIR"
+  warn "полная переустановка стирает узлы, туннели, клиентов и все пароли"
+  say "  бэкап состояния останется в $ETCDIR/backup-<дата>"
+  ANS="$(ask 'Переустановить с нуля? (y/N)' 'n')"
+  case "$ANS" in
+    y|Y|yes|Yes) REINSTALL=1; ok "переустановка: всё будет создано заново";;
+    *) die "переустановка отменена; существующие настройки не изменены";;
+  esac
+fi
+
+sec "адрес машины"
 detect_ip() {
   local url ip
   for url in https://api.ipify.org https://ifconfig.me/ip https://icanhazip.com; do
@@ -106,11 +124,11 @@ if [ "$IP_CONFIRM" != "y" ]; then
 fi
 ok "IP: $PUB_IP"
 
-hdr "2/4 порт панели"
+sec "порт панели"
 PANEL_PORT="$(ask 'Порт панели' '2096')"
 case "$PANEL_PORT" in *[!0-9]*) die "порт должен быть числом";; esac
 
-hdr "3/4 TLS панели"
+sec "TLS панели"
 say "  1) домен   — сертификат Let's Encrypt (нужен открытый порт 80)"
 say "  2) IP      — сертификат Let's Encrypt (порт 80, ~6 дней, продлевается сам)"
 say "  3) IP      — самоподписанный (ничего не нужно, браузер предупредит)"
@@ -144,7 +162,7 @@ esac
 
 if [ "$PANEL_TLS" = 1 ]; then PANEL_ADDR="0.0.0.0:$PANEL_PORT"; else PANEL_ADDR="127.0.0.1:$PANEL_PORT"; fi
 
-hdr "4/4 что будет сделано"
+sec "что будет сделано"
 say "  панель:    $( [ "$PANEL_TLS" = 1 ] && echo "https" || echo "http" )://$( [ "$PANEL_TLS" = 1 ] && echo "$HOST" || echo "127.0.0.1" ):$PANEL_PORT"
 say "  TLS:       $MODE"
 say "  состояние: $ETCDIR/state.json, артефакты: $STATEDIR/out"
@@ -252,9 +270,8 @@ else
   build_from_source
 fi
 
-mkdir -p "$PREFIX/bin"
-install -m 755 "$TMP/revhub" "$BIN"
-ok "бинарь: $BIN"
+chmod 755 "$TMP/revhub"
+ok "новый бинарь собран; установка после резервного копирования"
 
 # ------------------------------------------------------------------ настройка
 
@@ -266,13 +283,14 @@ ARGS=(install
   --state-dir "$STATEDIR"
   --unit-dir "$UNITDIR"
   --tls "$MODE")
+if [ "$REINSTALL" = 1 ]; then ARGS+=(--reinstall); fi
 if [ -n "$ADMIN_EMAIL" ]; then ARGS+=(--email "$ADMIN_EMAIL"); fi
 if [ -n "$DOMAIN" ]; then ARGS+=(--domain "$DOMAIN"); fi
 if [ "$PANEL_TLS" = 1 ]; then ARGS+=(--panel-tls); fi
 if [ "$SANDBOX" = 1 ]; then ARGS+=(--no-start --no-apply --skip-packages); fi
 
 say ""
-"$BIN" "${ARGS[@]}" || die "установка revhub install не удалась"
+"$TMP/revhub" "${ARGS[@]}" || die "установка revhub install не удалась"
 
 # ------------------------------------------------------------------ итог
 
@@ -301,6 +319,9 @@ say "  пароль:   $PANEL_PASS"
 say ""
 say "  файлы:    $ETCDIR (состояние, пароль в initial-password 0600)"
 say "  сменить пароль: $BIN passwd --state $ETCDIR/state.json"
+if [ "$REINSTALL" = 1 ]; then
+  say "  бэкап:    $(ls -d "$ETCDIR"/backup-* 2>/dev/null | tail -1) (state, credentials, secrets)"
+fi
 if [ "$MODE" = "ip-le" ] || [ "$MODE" = "domain" ]; then
   say "  сертификат продлевается сам (cron acme.sh); порт 80 должен оставаться открытым"
 fi

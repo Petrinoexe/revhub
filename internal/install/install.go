@@ -64,6 +64,7 @@ type Options struct {
 	UnitDir      string // куда класть юниты (по умолчанию /etc/systemd/system)
 	PanelOnly    bool   // только панель: без инбаунда, клиентов и правил
 	PanelUser    string // системный пользователь, от которого работает панель
+	Reinstall    bool   // снести текущую установку и поставить заново
 	DryRun       bool   // не выполнять системные команды, но файлы писать
 	NoStart      bool
 	NoApply      bool
@@ -112,6 +113,19 @@ func Run(o Options) (*Report, error) {
 		return rep, fmt.Errorf("нужен root: установка пишет в %s и управляет юнитами", o.EtcDir)
 	}
 
+	// 0. переустановка: остановить сервис, забэкапить и снести старое состояние
+	if o.Reinstall {
+		detail, err := r.resetInstall(o)
+		s := Step{Name: "переустановка", Detail: detail}
+		if err != nil {
+			s.Err = err.Error()
+		}
+		rep.Steps = append(rep.Steps, s)
+		if err != nil {
+			return rep, err
+		}
+	}
+
 	// 1. каталоги
 	r.step("каталоги", func() (string, error) {
 		for _, d := range []string{o.EtcDir, filepath.Join(o.EtcDir, "tls"), o.StateDir,
@@ -131,6 +145,10 @@ func Run(o Options) (*Report, error) {
 		}
 		return out, err
 	})
+
+	if err := r.firstStepError(); err != nil {
+		return rep, err
+	}
 
 	// 3. бинарь панели
 	r.step("бинарь revhub", func() (string, error) {
@@ -186,6 +204,10 @@ func Run(o Options) (*Report, error) {
 		}
 		return "поставлены: wireguard-tools, nftables", nil
 	})
+
+	if err := r.firstStepError(); err != nil {
+		return rep, err
+	}
 
 	// 5. TLS
 	tlsCfg, err := setupTLS(o, r)
@@ -256,6 +278,10 @@ func Run(o Options) (*Report, error) {
 		return fmt.Sprintf("%d файла в %s", len(files), dir), nil
 	})
 
+	if err := r.firstStepError(); err != nil {
+		return rep, err
+	}
+
 	r.step("включение сервисов", func() (string, error) {
 		if o.DryRun {
 			return "пропущено: --dry-run не трогает systemd", errSkip
@@ -267,12 +293,18 @@ func Run(o Options) (*Report, error) {
 			// xray мог быть поставлен снаружи со своим юнитом — не валим установку
 			rep.Steps = append(rep.Steps, Step{Name: "  примечание", Detail: "systemd: " + err.Error()})
 		}
-		if err := r.run("systemctl", "enable", "--now", "revhub"); err != nil {
+		if err := r.run("systemctl", "enable", "revhub"); err != nil {
 			return "", err
 		}
-		return "xray + revhub включены", nil
+		if err := r.run("systemctl", "restart", "revhub"); err != nil {
+			return "", err
+		}
+		return "xray + revhub включены, панель перезапущена", nil
 	})
 
+	if err := r.firstStepError(); err != nil {
+		return rep, err
+	}
 	rep.PanelURL = panelURL(o)
 	if len(st.Clients) > 0 { // панель ставится пустой — клиента может не быть
 		rep.SubURL = "/sub/" + st.Clients[0].SubToken
@@ -596,6 +628,67 @@ func (r *runner) acme(o Options) error {
 	return r.installCert(o, sh, o.Domain, filepath.Join(o.EtcDir, "tls"))
 }
 
+// resetInstall стирает текущую установку панели, оставляя бэкап: пароль, порт,
+// состояние и юниты создаются заново. Сертификаты не трогаем — они валидны по
+// прежнему адресу, а acme.sh живёт в своём каталоге.
+func (r *runner) resetInstall(o Options) (string, error) {
+	if !r.dry && o.UnitDir == "/etc/systemd/system" {
+		if err := r.run("systemctl", "stop", "revhub"); err != nil {
+			return "", fmt.Errorf("остановка revhub: %w", err)
+		}
+	}
+	if err := os.MkdirAll(o.EtcDir, 0o750); err != nil {
+		return "", err
+	}
+	backup, err := os.MkdirTemp(o.EtcDir, "backup-")
+	if err != nil {
+		return "", fmt.Errorf("бэкап: %w", err)
+	}
+	kill := []string{"state.json", "credentials.json", "secrets.json", "initial-password"}
+	made := ""
+	for _, name := range kill {
+		src := filepath.Join(o.EtcDir, name)
+		if _, err := os.Stat(src); err != nil {
+			continue
+		}
+		if err := os.MkdirAll(backup, 0o700); err != nil {
+			return "", err
+		}
+		if err := copyFile(src, filepath.Join(backup, name), 0o600); err != nil {
+			return "", fmt.Errorf("бэкап %s: %w", name, err)
+		}
+		made = backup
+	}
+	for _, item := range []struct{ src, name string }{
+		{filepath.Join(o.Prefix, "bin", "revhub"), "revhub"},
+		{filepath.Join(o.UnitDir, "revhub.service"), "revhub.service"},
+	} {
+		if _, err := os.Stat(item.src); os.IsNotExist(err) {
+			continue
+		} else if err != nil {
+			return "", fmt.Errorf("бэкап %s: %w", item.src, err)
+		}
+		if err := os.MkdirAll(backup, 0o700); err != nil {
+			return "", err
+		}
+		if err := copyFile(item.src, filepath.Join(backup, item.name), 0o600); err != nil {
+			return "", fmt.Errorf("бэкап %s: %w", item.src, err)
+		}
+		made = backup
+	}
+	if !r.dry {
+		for _, name := range kill {
+			if err := os.Remove(filepath.Join(o.EtcDir, name)); err != nil && !os.IsNotExist(err) {
+				return "", fmt.Errorf("удаление %s, резервная копия %s: %w", name, backup, err)
+			}
+		}
+	}
+	if made == "" {
+		return "нечего сносить: состояние не найдено", nil
+	}
+	return "старое состояние в " + made + ", пароль и порт будут новыми", nil
+}
+
 // ---------------------------------------------------------------- права панели
 
 // ensurePanelUser создаёт системного пользователя панели: сервис не должен
@@ -614,6 +707,10 @@ func (r *runner) ensurePanelUser(o Options) (string, error) {
 		return "", fmt.Errorf("нет useradd: создай пользователя %s вручную", o.PanelUser)
 	}
 	if err := runCmd("id", "-u", o.PanelUser); err == nil {
+		uid, _, ok := panelIDs(o.PanelUser)
+		if !ok || uid == 0 {
+			return "", fmt.Errorf("пользователь %s не найден или имеет UID 0", o.PanelUser)
+		}
 		return "пользователь " + o.PanelUser + " уже есть", nil
 	}
 	if err := runCmd("useradd", "--system", "--no-create-home",
@@ -1067,6 +1164,15 @@ type runner struct {
 }
 
 var errSkip = fmt.Errorf("пропущено")
+
+func (r *runner) firstStepError() error {
+	for _, step := range r.rep.Steps {
+		if step.Err != "" {
+			return fmt.Errorf("%s: %s", step.Name, step.Err)
+		}
+	}
+	return nil
+}
 
 func (r *runner) step(name string, fn func() (string, error)) {
 	detail, err := fn()
