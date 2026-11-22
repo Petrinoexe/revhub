@@ -566,17 +566,50 @@ func (r *runner) acme(o Options) error {
 	default:
 		return fmt.Errorf("--acme должен быть http или dns")
 	}
+	if o.Email != "" {
+		// аккаунт мог быть создан раньше — ошибку регистрации не считаем fatal
+		_ = r.run(sh, "--register-account", "-m", o.Email)
+	}
 	if err := r.run(issue[0], issue[1:]...); err != nil {
 		return fmt.Errorf("выпуск сертификата не удался: %w", err)
 	}
-	tlsDir := filepath.Join(o.EtcDir, "tls")
-	if err := r.run(sh, "--install-cert", "-d", o.Domain, "--ecc",
-		"--fullchain-file", filepath.Join(tlsDir, "fullchain.pem"),
-		"--key-file", filepath.Join(tlsDir, "key.pem"),
-		"--reloadcmd", "systemctl try-restart xray || true; systemctl try-restart revhub || true"); err != nil {
-		return err
+	return r.installCert(sh, o.Domain, filepath.Join(o.EtcDir, "tls"))
+}
+
+// installCert раскладывает выпущенный сертификат по путям панели.
+//
+// Два момента, на которых мы уже спотыкались (и которые 3x-ui решает так же):
+//  1. acme.sh не создаёт каталог назначения — "touch: cannot touch ... No such file";
+//  2. при падении --reloadcmd acme.sh возвращает ненулевой код, хотя файлы уже
+//     скопированы (юнитов ещё нет на шаге TLS). Поэтому код возврата не
+//     считаем приговором: проверяем, что файлы на месте и непустые.
+func (r *runner) installCert(sh, domain, certDir string) error {
+	if err := os.MkdirAll(certDir, 0o755); err != nil {
+		return fmt.Errorf("каталог для сертификата %s: %w", certDir, err)
 	}
-	return r.checkCert(filepath.Join(tlsDir, "fullchain.pem"), filepath.Join(tlsDir, "key.pem"))
+	certFile := filepath.Join(certDir, "fullchain.pem")
+	keyFile := filepath.Join(certDir, "key.pem")
+	err := r.run(sh, "--install-cert", "--force", "-d", domain, "--ecc",
+		"--fullchain-file", certFile,
+		"--key-file", keyFile,
+		"--reloadcmd", "systemctl try-restart xray || true; systemctl try-restart revhub || true")
+	if r.dry {
+		return nil
+	}
+	if verr := r.checkCert(certFile, keyFile); verr != nil {
+		if err != nil {
+			return fmt.Errorf("%w; acme.sh: %v", verr, err)
+		}
+		return verr
+	}
+	// ключ читает только root, сертификат — все
+	_ = os.Chmod(keyFile, 0o600)
+	_ = os.Chmod(certFile, 0o644)
+	if err != nil {
+		r.rep.Steps = append(r.rep.Steps, Step{Name: "  reloadcmd",
+			Detail: "acme.sh вернул ошибку, но сертификат на месте: " + err.Error()})
+	}
+	return nil
 }
 
 // checkCert убеждается, что acme.sh действительно положил файлы: иначе панель
@@ -627,15 +660,14 @@ func (r *runner) acmeIP(o Options, ip string) error {
 	if err := r.run(sh, "--set-default-ca", "--server", "letsencrypt", "--force"); err != nil {
 		return err
 	}
+	if email != "" {
+		_ = r.run(sh, "--register-account", "-m", email)
+	}
 	if err := r.run(sh, "--issue", "-d", ip, "--standalone", "--httpport", strconv.Itoa(port),
-		"--server", "letsencrypt", "--certificate-profile", "shortlived", "--days", "6", "--force"); err != nil {
+		"--server", "letsencrypt", "--certificate-profile", "shortlived", "--days", "6"); err != nil {
 		return fmt.Errorf("выпуск на %s: %w (порт %d должен быть доступен снаружи)", ip, err, port)
 	}
-	certDir := filepath.Join(o.EtcDir, "tls", "ip")
-	return r.run(sh, "--install-cert", "-d", ip, "--ecc",
-		"--fullchain-file", filepath.Join(certDir, "fullchain.pem"),
-		"--key-file", filepath.Join(certDir, "key.pem"),
-		"--reloadcmd", "systemctl try-restart xray || true; systemctl try-restart revhub || true")
+	return r.installCert(sh, ip, filepath.Join(o.EtcDir, "tls", "ip"))
 }
 
 // ---------------------------------------------------------------- состояние

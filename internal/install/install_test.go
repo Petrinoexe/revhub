@@ -362,3 +362,73 @@ func TestEnsureACMEDownloads(t *testing.T) {
 		}
 	}
 }
+
+// acme.sh не создаёт каталог назначения: installCert обязан сделать это сам.
+func TestInstallCertCreatesDir(t *testing.T) {
+	dir := t.TempDir()
+	r := &runner{dry: true, rep: &Report{}}
+	certDir := filepath.Join(dir, "tls", "ip") // ещё не существует
+	if err := r.installCert("/bin/true", "203.0.113.7", certDir); err != nil {
+		t.Fatalf("installCert: %v", err)
+	}
+	if st, err := os.Stat(certDir); err != nil || !st.IsDir() {
+		t.Errorf("каталог не создан: %v", err)
+	}
+}
+
+// Полный путь выпуска на IP с подставным acme.sh: проверяем аргументы, права на
+// ключ и то, что ненулевой код возврата из --installcert не валит установку.
+func TestAcmeIPWithStub(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "acme.log")
+	sh := filepath.Join(dir, "acme", "acme.sh")
+	if err := os.MkdirAll(filepath.Dir(sh), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	stub := `#!/bin/sh
+printf '%s\n' "$*" >> "` + logPath + `"
+case " $* " in
+  *" --install-cert "*)
+    fc=""; kf=""
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --fullchain-file) fc="$2"; shift 2 ;;
+        --key-file) kf="$2"; shift 2 ;;
+        *) shift ;;
+      esac
+    done
+    [ -n "$fc" ] && printf 'CERT\n' > "$fc"
+    [ -n "$kf" ] && printf 'KEY\n' > "$kf"
+    exit 1
+    ;;
+esac
+exit 0
+`
+	if err := os.WriteFile(sh, []byte(stub), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	o := Defaults()
+	o.EtcDir, o.UnitDir = dir, filepath.Join(dir, "units")
+	o.ACMEHTTPPort = 8089
+	o.Email = "admin@example.com"
+	r := &runner{rep: &Report{}}
+	if err := r.acmeIP(o, "203.0.113.7"); err != nil {
+		t.Fatalf("acmeIP: %v", err)
+	}
+	certDir := filepath.Join(dir, "tls", "ip")
+	for _, f := range []string{"fullchain.pem", "key.pem"} {
+		if st, err := os.Stat(filepath.Join(certDir, f)); err != nil || st.Size() == 0 {
+			t.Errorf("%s не создан: %v", f, err)
+		}
+	}
+	if st, err := os.Stat(filepath.Join(certDir, "key.pem")); err == nil && st.Mode().Perm() != 0o600 {
+		t.Errorf("права ключа %v, ожидалось 0600", st.Mode().Perm())
+	}
+	log, _ := os.ReadFile(logPath)
+	txt := string(log)
+	for _, want := range []string{"--certificate-profile shortlived", "--install-cert", "--days 6", "--register-account"} {
+		if !strings.Contains(txt, want) {
+			t.Errorf("в вызовах acme.sh нет %q:\n%s", want, txt)
+		}
+	}
+}
