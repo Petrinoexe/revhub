@@ -397,6 +397,26 @@ STATE_DIR=${STATE_DIR:-/etc/revhub}
 	}
 	if len(wgFiles) > 0 {
 		b.WriteString("install -d -m 700 /etc/wireguard\n")
+		// Удалённый из панели туннель оставляет на узле живой интерфейс, его
+		// адрес, метку и таблицу маршрутов. Новый туннель получает те же
+		// значения (адресация считается по состоянию) и падает на
+		// «Address already in use». Поэтому снимаем всё наше, чего нет в
+		// текущем наборе. Чужие конфиги (ручной wg0) не трогаем: у них нет
+		// нашего заголовка.
+		b.WriteString(`keep="`)
+		for _, f := range wgFiles {
+			b.WriteString(" " + f)
+		}
+		b.WriteString(` "
+for stale in /etc/wireguard/*.conf; do
+  [ -e "$stale" ] || continue
+  grep -q '^# revhub:' "$stale" || continue
+  case "$keep" in *" $(basename "$stale") "*) continue;; esac
+  wg-quick down "$(basename "$stale" .conf)" 2>/dev/null || true
+  rm -f -- "$stale"
+  echo "[revhub] снят устаревший интерфейс $(basename "$stale" .conf)"
+done
+`)
 	}
 	for _, f := range wgFiles {
 		name := strings.TrimSuffix(f, ".conf")

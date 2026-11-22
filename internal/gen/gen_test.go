@@ -242,6 +242,43 @@ func keysOf(m map[string]File) []string {
 	return out
 }
 
+// Удалённый из панели туннель оставляет живой интерфейс с тем же адресом и
+// меткой — новый туннель падает на «Address already in use». apply.sh обязан
+// снять наши устаревшие конфиги, но не трогать чужие (ручной wg0).
+func TestApplyScriptRemovesStaleRevhubInterfaces(t *testing.T) {
+	var st model.State
+	st.Nodes = []model.Node{{ID: "hub", PublicAddr: "194.67.203.189:65423"}, {ID: "exit", PublicAddr: "5.180.31.201:443"}}
+	st.Tunnels = []model.Tunnel{{ID: "tn", Name: "eu", Kind: model.TunnelWGReverse,
+		FromNode: "hub", ToNode: "exit", Enabled: true, Subnet: "10.77.1.0/30",
+		ListenPort: 51820, ForwardPolicy: true,
+		FromKeyPriv: zeroKey, FromKeyPub: zeroKey, ToKeyPriv: zeroKey, ToKeyPub: zeroKey}}
+
+	files, err := Artifacts(st, "hub")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var script string
+	for _, f := range files {
+		if f.Name == "apply.sh" {
+			script = f.Content
+		}
+	}
+	if !strings.Contains(script, `grep -q '^# revhub:'`) {
+		t.Error("apply.sh должен опознавать свои конфиги по заголовку, а не удалять всё подряд")
+	}
+	if !strings.Contains(script, "снят устаревший интерфейс") {
+		t.Error("apply.sh не снимает устаревшие интерфейсы")
+	}
+	// Текущий туннель обязан остаться в keep-списке.
+	if !strings.Contains(script, "wg-eu.conf") {
+		t.Errorf("в списке сохраняемых нет текущего туннеля:\n%s", script)
+	}
+	// Снятие должно идти до подъёма, иначе адрес ещё занят.
+	if i, j := strings.Index(script, "for stale in"), strings.Index(script, "wg-quick up"); i < 0 || j < 0 || i > j {
+		t.Errorf("порядок неверный: снятие (i=%d) должно быть до подъёма (j=%d)", i, j)
+	}
+}
+
 // zeroKey — валидный по форме ключ WireGuard (32 байта в base64).
 const zeroKey = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
 
