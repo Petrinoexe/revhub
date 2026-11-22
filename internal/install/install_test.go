@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"revhub/internal/auth"
 	"revhub/internal/certs"
 	"revhub/internal/model"
 )
@@ -32,6 +33,38 @@ func runSandbox(t *testing.T, mode string) (*Report, Options, string) {
 		t.Fatalf("установка в песочницу: %v", err)
 	}
 	return rep, o, dir
+}
+
+func TestGeneratedPasswordWorksAfterReinstall(t *testing.T) {
+	dir := t.TempDir()
+	o := Defaults()
+	o.Prefix, o.EtcDir, o.StateDir, o.UnitDir = filepath.Join(dir, "p"), filepath.Join(dir, "e"), filepath.Join(dir, "s"), filepath.Join(dir, "units")
+	o.Host, o.Mode = "203.0.113.9", TLSIP
+	o.DryRun, o.NoStart, o.NoApply, o.SkipPkgs, o.PrintPass = true, true, true, true, true
+	first, err := Run(o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	credentials, err := auth.Load(filepath.Join(o.EtcDir, "state.json"))
+	if err != nil || first.Password == "" || !credentials.Verify(o.AdminUser, first.Password) {
+		t.Fatal("generated password does not authenticate")
+	}
+	// resetInstall deliberately does not delete files in DryRun; exercise the real reset in a sandbox.
+	r := &runner{rep: &Report{}}
+	if _, err := r.resetInstall(o); err != nil {
+		t.Fatal(err)
+	}
+	second, err := Run(o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	credentials, err = auth.Load(filepath.Join(o.EtcDir, "state.json"))
+	if err != nil || second.Password == "" || !credentials.Verify(o.AdminUser, second.Password) {
+		t.Fatal("new password does not authenticate")
+	}
+	if first.Password == second.Password || credentials.Verify(o.AdminUser, first.Password) {
+		t.Fatal("old password remained valid")
+	}
 }
 
 func TestInstallTLSIP(t *testing.T) {
