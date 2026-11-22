@@ -94,7 +94,7 @@ func Artifacts(st model.State, nodeID string) ([]File, error) {
 		if t.ListenerNode() == t.ToNode {
 			peer = toAddr
 		}
-		kicks = append(kicks, kick{Iface: t.WGInterface(), Peer: peer})
+		kicks = append(kicks, kick{Iface: t.WGInterface(), Peer: peer, PeerPub: otherPubOf(t, nodeID)})
 	}
 
 	files = append(files,
@@ -323,8 +323,17 @@ func pick(cond bool, a, b string) string {
 
 // kick — кого и по какому интерфейсу «раскачивать» на дозванивающейся стороне.
 type kick struct {
-	Iface string
-	Peer  string
+	Iface   string
+	Peer    string // адрес пира в подсети туннеля (для журнала/диагностики)
+	PeerPub string // публичный ключ пира — им и «будим» сессию
+}
+
+// otherPubOf — публичный ключ противоположной стороны туннеля.
+func otherPubOf(t model.Tunnel, nodeID string) string {
+	if nodeID == t.FromNode {
+		return t.ToKeyPub
+	}
+	return t.FromKeyPub
 }
 
 // kickFiles рендерит скрипт и таймер, которые держат сессию обратного туннеля
@@ -336,17 +345,22 @@ func kickFiles(kicks []kick) []File {
 		script := fmt.Sprintf(`#!/bin/sh
 # revhub: раскачка обратного туннеля %[1]s.
 # Соединение открывает дозванивающаяся сторона; слушатель не может её разбудить,
-# пока не знает адреса пира. Поэтому при отсутствии/устаревании сессии шлём
-# один пакет по туннелю — хендшейк уходит от нас к слушателю.
+# пока не знает адреса пира. Поэтому при отсутствии/устаревании сессии ненадолго
+# включаем keepalive: WireGuard сразу шлёт пакет, хендшейк уходит от нас к
+# слушателю, после чего keepalive выключается и фонового трафика нет.
+# Никаких внешних утилит (ping/curl) — только wg, который здесь точно есть.
 set -u
 iface=%[1]s
-peer=%[2]s
+peerpub=%[3]s
+peer_ip=%[2]s
 h=$(wg show "$iface" latest-handshakes 2>/dev/null | awk '{print $2}' | sort -n | tail -1)
 now=$(date +%%s)
 if [ -z "${h:-}" ] || [ "${h:-0}" -eq 0 ] || [ $((now-h)) -gt 150 ]; then
-  ping -c1 -W1 -I "$iface" "$peer" >/dev/null 2>&1 || true
+  wg set "$iface" peer "$peerpub" persistent-keepalive 1 2>/dev/null || exit 0
+  sleep 2
+  wg set "$iface" peer "$peerpub" persistent-keepalive off 2>/dev/null || true
 fi
-`, k.Iface, k.Peer)
+`, k.Iface, k.Peer, k.PeerPub)
 		out = append(out, File{Name: "kick-" + k.Iface + ".sh", Content: script, Mode: 0o755})
 		out = append(out, File{Name: "revhub-kick-" + k.Iface + ".service",
 			Content: fmt.Sprintf(`[Unit]

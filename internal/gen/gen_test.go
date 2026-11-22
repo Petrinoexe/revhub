@@ -195,8 +195,18 @@ func TestDialerGetsKickInsteadOfKeepalive(t *testing.T) {
 		t.Fatalf("нет скрипта раскачки, есть: %v", keysOf(byName))
 	}
 	// Пир — слушающая сторона (хаб), её адрес в подсети: 10.77.3.1.
-	if !strings.Contains(kick.Content, "peer=10.77.3.1") || !strings.Contains(kick.Content, "iface=wg-eu") {
+	if !strings.Contains(kick.Content, "peer_ip=10.77.3.1") || !strings.Contains(kick.Content, "iface=wg-eu") {
 		t.Errorf("скрипт раскачки смотрит не туда:\n%s", kick.Content)
+	}
+	// Раскачка не должна зависеть от ping/curl: на свежем узле их может не быть.
+	// Ненадолго включаем keepalive — WireGuard сам шлёт пакет и хендшейк уходит
+	// от дозванивающейся стороны к слушателю.
+	if !strings.Contains(kick.Content, `persistent-keepalive 1`) ||
+		!strings.Contains(kick.Content, `persistent-keepalive off`) {
+		t.Errorf("раскачка должна делаться через wg:\n%s", kick.Content)
+	}
+	if strings.Contains(kick.Content, "ping ") {
+		t.Errorf("раскачка не должна зависеть от ping:\n%s", kick.Content)
 	}
 	if !strings.Contains(kick.Content, "latest-handshakes") {
 		t.Error("скрипт должен проверять наличие сессии, а не молотить пингом всегда")
