@@ -548,15 +548,16 @@ func TestUnitRunsAsPanelUser(t *testing.T) {
 
 	for _, want := range []string{
 		"User=revhub", "Group=revhub", "UMask=0027",
-		"ProtectSystem=strict", "StateDirectoryMode=0750",
-		"ReadWritePaths=/etc/revhub /var/lib/revhub",
+		"ProtectSystem=full", "StateDirectoryMode=0750",
+		"ReadWritePaths=/etc/revhub /var/lib/revhub /usr/local/etc/xray /etc/wireguard -/run/sudo",
+		"RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK",
 		"AmbientCapabilities=CAP_NET_BIND_SERVICE",
 	} {
 		if !strings.Contains(u, want) {
 			t.Errorf("в юните нет %q", want)
 		}
 	}
-	for _, bad := range []string{"User=root", "ReadWritePaths=/etc/revhub/state.json", "ProtectSystem=full"} {
+	for _, bad := range []string{"User=root", "ReadWritePaths=/etc/revhub/state.json", "ProtectSystem=strict"} {
 		if strings.Contains(u, bad) {
 			t.Errorf("в юните осталось %q", bad)
 		}
@@ -763,6 +764,58 @@ func TestRepairDryRunKeepsState(t *testing.T) {
 	}
 }
 
+// Правило sudo не должно содержать аргументов: sudo сравнивает их буквально и
+// «revhub apply-local» разрешал бы только вызов без --node/--state.
+func TestApplySudoersBodyHasNoArguments(t *testing.T) {
+	body := applySudoersBody("revhub", "/usr/local/bin/revhub")
+	var rule string
+	for _, line := range strings.Split(body, "\n") {
+		if strings.HasPrefix(line, "revhub ALL=") {
+			rule = line
+		}
+	}
+	if rule != "revhub ALL=(root) NOPASSWD: /usr/local/bin/revhub" {
+		t.Fatalf("правило: %q", rule)
+	}
+	if strings.Contains(rule, "apply-local") {
+		t.Error("аргументы в правиле ломают вызов с --node/--state")
+	}
+}
+
+// Repair обновляет юнит старой установки: strict → full, доступ к xray/wireguard.
+func TestUpgradePanelUnitOldInstall(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "revhub.service")
+	old := `[Service]
+ExecStart=/usr/local/bin/revhub serve --addr 0.0.0.0:65423
+ProtectSystem=strict
+ReadWritePaths=/etc/revhub /var/lib/revhub
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+`
+	if err := os.WriteFile(p, []byte(old), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	changed, err := upgradePanelUnit(p)
+	if err != nil || !changed {
+		t.Fatalf("changed=%v err=%v", changed, err)
+	}
+	got, _ := os.ReadFile(p)
+	for _, want := range []string{
+		"ProtectSystem=full",
+		"ReadWritePaths=/etc/revhub /var/lib/revhub /usr/local/etc/xray /etc/wireguard -/run/sudo",
+		"RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK",
+		"ExecStart=/usr/local/bin/revhub serve --addr 0.0.0.0:65423",
+	} {
+		if !strings.Contains(string(got), want) {
+			t.Errorf("нет %q:\n%s", want, got)
+		}
+	}
+	// повторный прогон ничего не меняет
+	if changed, err := upgradePanelUnit(p); err != nil || changed {
+		t.Errorf("повтор: changed=%v err=%v", changed, err)
+	}
+}
+
 // Свой юнит уже стоит — не трогаем и не плодим бэкапы.
 func TestEnsureXrayUnitKeepsOwnUnit(t *testing.T) {
 	dir := t.TempDir()
@@ -806,7 +859,7 @@ func TestGrantApplyLocalRule(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"/etc/sudoers.d/revhub", "revhub", "/usr/local/bin/revhub apply-local"} {
+	for _, want := range []string{"/etc/sudoers.d/revhub", "revhub", "/usr/local/bin/revhub"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("в отчёте нет %q: %s", want, got)
 		}

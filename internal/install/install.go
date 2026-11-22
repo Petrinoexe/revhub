@@ -365,6 +365,26 @@ func Repair(o Options, statePath string) (*Report, error) {
 		return r.ensureXrayUnit(o, xrayPath)
 	})
 	r.step("применение конфига панелью", func() (string, error) { return r.grantApplyLocal(o) })
+	r.step("юнит панели", func() (string, error) {
+		p := filepath.Join(o.UnitDir, "revhub.service")
+		if _, err := os.Stat(p); err != nil {
+			return "юнита панели нет — нечего править", nil
+		}
+		changed, err := upgradePanelUnit(p)
+		if err != nil {
+			return "", err
+		}
+		if !changed {
+			return "юнит уже с нужными правами", nil
+		}
+		if err := r.run("systemctl", "daemon-reload"); err != nil {
+			return "", err
+		}
+		if err := r.run("systemctl", "restart", "revhub"); err != nil {
+			return "", err
+		}
+		return "юнит обновлён (ProtectSystem=full, доступ к xray/wireguard, AF_NETLINK), сервис перезапущен", nil
+	})
 	r.step("артефакты узла", func() (string, error) {
 		st, err := readState(statePath)
 		if err != nil {
@@ -973,17 +993,17 @@ func (r *runner) grantApplyLocal(o Options) (string, error) {
 	}
 	bin := filepath.Join(o.Prefix, "bin", "revhub")
 	path := "/etc/sudoers.d/revhub"
-	body := fmt.Sprintf(`# revhub: панель применяет конфиг ядра и WireGuard через собственный бинарь
-# (apply.sh из каталога панели root не исполняет — артефакты рендерятся заново)
-%s ALL=(root) NOPASSWD: %s apply-local
-`, o.PanelUser, bin)
+	body := applySudoersBody(o.PanelUser, bin)
 	if r.dry {
-		return "будет " + path + ": " + o.PanelUser + " → " + bin + " apply-local", nil
+		return "будет " + path + ": " + o.PanelUser + " → " + bin + " (любая подкоманда)", nil
 	}
 	if os.Geteuid() != 0 {
 		return "пропущено: нужен root, чтобы записать " + path, errSkip
 	}
 	if err := os.MkdirAll("/etc/sudoers.d", 0o750); err != nil {
+		return "", err
+	}
+	if err := r.ensureSudoRunDir(o); err != nil {
 		return "", err
 	}
 	tmp := path + ".revhub"
@@ -1001,7 +1021,79 @@ func (r *runner) grantApplyLocal(o Options) (string, error) {
 		_ = os.Remove(tmp)
 		return "", err
 	}
-	return fmt.Sprintf("%s: %s может выполнить %s apply-local", path, o.PanelUser, bin), nil
+	return fmt.Sprintf("%s: %s может выполнить %s", path, o.PanelUser, bin), nil
+}
+
+// applySudoersBody — правило sudo для применения конфига.
+//
+// Аргументы после пути НЕ указываем: sudo сопоставляет их буквально, поэтому
+// строка «revhub apply-local» разрешала бы только вызов без параметров, а панель
+// передаёт ещё --node/--state. Что именно можно запускать от root, решает сам
+// бинарь: apply-local — единственная подкоманда, которой нужен root, и она
+// заново рендерит артефакты из state.json, а не исполняет чужие скрипты.
+func applySudoersBody(panelUser, bin string) string {
+	return fmt.Sprintf(`# revhub: панель применяет конфиг ядра и WireGuard через собственный бинарь
+# (apply.sh из каталога панели root не исполняет — артефакты рендерятся заново)
+# Аргументы не ограничиваем: sudo сравнивает их буквально и сломался бы на --node.
+%s ALL=(root) NOPASSWD: %s
+`, panelUser, bin)
+}
+
+// upgradePanelUnit правит права уже установленного юнита панели под текущую
+// схему применения конфига: apply-local (через sudo, в том же mount namespace)
+// пишет /usr/local/etc/xray и /etc/wireguard, wg-quick нужен AF_NETLINK, а
+// sudo — /run/sudo. ExecStart и остальные строки не трогаем: установщик мог
+// собрать их с нестандартными путями.
+func upgradePanelUnit(path string) (bool, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return false, err
+	}
+	lines := strings.Split(string(b), "\n")
+	changed := false
+	for i, line := range lines {
+		switch {
+		case line == "ProtectSystem=strict":
+			lines[i] = "ProtectSystem=full"
+			changed = true
+		case strings.HasPrefix(line, "ReadWritePaths="):
+			if !strings.Contains(line, "/usr/local/etc/xray") {
+				lines[i] = strings.TrimSpace(line) + " /usr/local/etc/xray /etc/wireguard -/run/sudo"
+				changed = true
+			}
+		case strings.HasPrefix(line, "RestrictAddressFamilies="):
+			if !strings.Contains(line, "AF_NETLINK") {
+				lines[i] = line + " AF_NETLINK"
+				changed = true
+			}
+		}
+	}
+	if !changed {
+		return false, nil
+	}
+	if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")), 0o644); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// ensureSudoRunDir создаёт /run/sudo, куда sudo пишет отметку времени. Под
+// ProtectSystem=full /run доступен, но каталог должен существовать заранее:
+// sudo не умеет его создавать в чужом namespace.
+func (r *runner) ensureSudoRunDir(o Options) error {
+	if r.dry {
+		return nil
+	}
+	if err := os.MkdirAll("/run/sudo", 0o700); err != nil {
+		return fmt.Errorf("каталог /run/sudo: %w", err)
+	}
+	_ = os.Chown("/run/sudo", 0, 0)
+	if err := os.MkdirAll("/etc/tmpfiles.d", 0o755); err != nil {
+		return err
+	}
+	body := "# revhub: каталог отметок sudo живёт в /run и должен быть writable\n" +
+		"d /run/sudo 0700 root root -\n"
+	return os.WriteFile("/etc/tmpfiles.d/revhub.conf", []byte(body), 0o644)
 }
 
 // fixCertPerms делает сертификат читаемым для панели, а ключ — только группе.
@@ -1327,13 +1419,16 @@ StateDirectory=revhub
 StateDirectoryMode=0750
 PrivateTmp=true
 ProtectHome=read-only
-ProtectSystem=strict
-# каталоги, а не файлы: панель пишет состояние через временный файл рядом
-ReadWritePaths=%[1]s %[7]s
+ProtectSystem=full
+# Каталоги, а не файлы: панель пишет состояние через временный файл рядом.
+# xray/ и wireguard/ — потому что apply-local (через sudo, в этом же namespace)
+# кладёт туда конфиги; /run/sudo — отметка времени sudo.
+ReadWritePaths=%[1]s %[7]s /usr/local/etc/xray /etc/wireguard -/run/sudo
 # sudo нужен для применения конфига (apply-local); NoNewPrivileges и
 # ограничение CapabilityBoundingSet его бы заблокировали.
 AmbientCapabilities=CAP_NET_BIND_SERVICE
-RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+# AF_NETLINK — wg-quick и ip из apply.sh
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
 LockPersonality=true
 
 [Install]
