@@ -118,6 +118,9 @@ func apiInbound() map[string]any {
 }
 
 func buildInbound(st model.State, in model.Inbound) (map[string]any, error) {
+	if in.Kind == model.InboundWireGuard {
+		return buildWireGuardInbound(st, in)
+	}
 	clients := []any{}
 	for _, c := range st.Clients {
 		if !c.Enabled || !contains(c.Inbounds, in.ID) {
@@ -162,6 +165,34 @@ func buildInbound(st model.State, in model.Inbound) (map[string]any, error) {
 		"sniffing": map[string]any{
 			"enabled":      true,
 			"destOverride": []string{"http", "tls", "quic"},
+		},
+	}, nil
+}
+
+func buildWireGuardInbound(st model.State, in model.Inbound) (map[string]any, error) {
+	wg := in.WireGuard
+	if wg == nil || wg.PrivateKey == "" || wg.ServerAddress() == "" {
+		return nil, fmt.Errorf("нет настроек WireGuard")
+	}
+	peers := []any{}
+	for _, c := range st.Clients {
+		if !c.Enabled || c.Expired() || !contains(c.Inbounds, in.ID) {
+			continue
+		}
+		peer, ok := c.WireGuard[in.ID]
+		if !ok {
+			return nil, fmt.Errorf("у клиента %s нет ключей WireGuard", c.Email)
+		}
+		peers = append(peers, map[string]any{
+			"email": c.Email, "publicKey": peer.PublicKey, "preSharedKey": peer.PresharedKey,
+			"allowedIPs": []string{peer.Address},
+		})
+	}
+	return map[string]any{
+		"tag": in.Tag, "listen": in.Listen, "port": in.Port, "protocol": "wireguard",
+		"settings": map[string]any{
+			"secretKey": wg.PrivateKey, "address": []string{wg.ServerAddress()},
+			"mtu": model.DefaultWireGuardMTU, "peers": peers,
 		},
 	}, nil
 }

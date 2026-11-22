@@ -10,9 +10,15 @@ import (
 	"fmt"
 	"net"
 	"strings"
+	"time"
 )
 
 const StateVersion = 1
+
+const (
+	InboundVLESS     = "vless"
+	InboundWireGuard = "wireguard"
+)
 
 // Kind'ы туннелей.
 const (
@@ -66,7 +72,7 @@ type Inbound struct {
 	NodeID     string `json:"node_id"`
 	Tag        string `json:"tag"`
 	Name       string `json:"name"`
-	Kind       string `json:"kind"`   // vless
+	Kind       string `json:"kind"`   // vless | wireguard
 	Listen     string `json:"listen"` // 0.0.0.0 | 127.0.0.1
 	Port       int    `json:"port"`
 	Transport  string `json:"transport"` // tcp | ws | xhttp
@@ -83,13 +89,14 @@ type Inbound struct {
 	//   acmeip     — голый IP через Let's Encrypt (shortlived, ~6 дней)
 	//   selfsigned — на голый IP (CA такие не выдают), клиенту нужен пин/allowInsecure
 	//   file       — готовые файлы
-	CertSource string `json:"cert_source"`
-	Domain     string `json:"domain"` // для acme и для SNI
-	IP         string `json:"ip"`     // для selfsigned: что попадёт в SAN
-	CertFile   string `json:"cert_file"`
-	KeyFile    string `json:"key_file"`
-	SelfSigned bool   `json:"self_signed"`
-	Enabled    bool   `json:"enabled"`
+	CertSource string            `json:"cert_source"`
+	Domain     string            `json:"domain"` // для acme и для SNI
+	IP         string            `json:"ip"`     // для selfsigned: что попадёт в SAN
+	CertFile   string            `json:"cert_file"`
+	KeyFile    string            `json:"key_file"`
+	SelfSigned bool              `json:"self_signed"`
+	Enabled    bool              `json:"enabled"`
+	WireGuard  *WireGuardInbound `json:"wireguard,omitempty"`
 }
 
 type Tunnel struct {
@@ -134,15 +141,24 @@ type Tunnel struct {
 }
 
 type Client struct {
-	ID        string   `json:"id"`
-	Email     string   `json:"email"`
-	UUID      string   `json:"uuid"`
-	Enabled   bool     `json:"enabled"`
-	ExpiresAt string   `json:"expires_at"` // RFC3339, пусто = бессрочно
-	QuotaGB   float64  `json:"quota_gb"`   // 0 = без квоты
-	Inbounds  []string `json:"inbounds"`   // id инбаундов
-	SubToken  string   `json:"sub_token"`
-	Flow      string   `json:"flow"`
+	ID        string                   `json:"id"`
+	Email     string                   `json:"email"`
+	UUID      string                   `json:"uuid"`
+	Enabled   bool                     `json:"enabled"`
+	ExpiresAt string                   `json:"expires_at"` // RFC3339, пусто = бессрочно
+	QuotaGB   float64                  `json:"quota_gb"`   // 0 = без квоты
+	Inbounds  []string                 `json:"inbounds"`   // id инбаундов
+	SubToken  string                   `json:"sub_token"`
+	Flow      string                   `json:"flow"`
+	WireGuard map[string]WireGuardPeer `json:"wireguard,omitempty"` // по ID инбаунда
+}
+
+func (c Client) Expired() bool {
+	if c.ExpiresAt == "" {
+		return false
+	}
+	t, err := time.Parse(time.RFC3339, c.ExpiresAt)
+	return err != nil || !time.Now().Before(t)
 }
 
 type Rule struct {
@@ -321,6 +337,13 @@ func (s *State) Normalize() {
 	}
 	for i := range s.Inbounds {
 		in := &s.Inbounds[i]
+		if in.Kind == "" {
+			in.Kind = InboundVLESS
+		}
+		if in.Kind == InboundWireGuard {
+			in.normalizeWireGuard()
+			continue
+		}
 		if in.Transport == "" {
 			in.Transport = "tcp"
 		}
@@ -390,6 +413,9 @@ func (s *State) Normalize() {
 	}
 	for i := range s.Clients {
 		c := &s.Clients[i]
+		if c.ID == "" {
+			c.ID = NewID("cl")
+		}
 		if c.UUID == "" {
 			c.UUID = GenUUID()
 		}
@@ -397,6 +423,7 @@ func (s *State) Normalize() {
 			c.SubToken = GenToken()
 		}
 	}
+	s.normalizeWireGuardPeers()
 }
 
 // ValidTags возвращает теги исходящих, существующие на узле. Тег туннеля
@@ -444,7 +471,7 @@ func (s State) Validate() error {
 	}
 
 	tags := map[string]bool{}
-	for _, in := range s.Inbounds {
+	for i, in := range s.Inbounds {
 		claim(in.ID, "инбаунд "+in.Tag)
 		if !nodes[in.NodeID] {
 			add("инбаунд %s: узел %q не найден", in.Tag, in.NodeID)
@@ -458,6 +485,16 @@ func (s State) Validate() error {
 		tags[in.NodeID+"/"+in.Tag] = true
 		if in.Port <= 0 || in.Port > 65535 {
 			add("инбаунд %s: некорректный порт %d", in.Tag, in.Port)
+		}
+		switch in.Kind {
+		case InboundWireGuard:
+			s.validateWireGuard(in, add)
+			s.validateWireGuardPort(i, add)
+			continue
+		case InboundVLESS, "":
+		default:
+			add("инбаунд %s: неизвестный протокол %q", in.Tag, in.Kind)
+			continue
 		}
 		if in.Security == "reality" {
 			if in.PrivateKey == "" || in.ShortID == "" || in.Dest == "" || in.SNI == "" {

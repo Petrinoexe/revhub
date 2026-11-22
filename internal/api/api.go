@@ -278,6 +278,7 @@ func (s *Server) subLink(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		links := sub.Links(st, c)
+		w.Header().Set("Cache-Control", "no-store")
 		writeJSON(w, http.StatusOK, map[string]any{
 			"url":   "/sub/" + c.SubToken,
 			"count": len(links),
@@ -290,6 +291,7 @@ func (s *Server) subLink(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) subscription(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
 	token := r.PathValue("token")
 	st := s.Store.Snapshot()
 	for _, c := range st.Clients {
@@ -424,7 +426,11 @@ func writeErr(w http.ResponseWriter, code int, msg string) {
 
 func logRequests(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		fmt.Printf("%s %s\n", r.Method, r.URL.Path)
+		path := r.URL.Path
+		if strings.HasPrefix(path, "/sub/") {
+			path = "/sub/{token}"
+		}
+		fmt.Printf("%s %s\n", r.Method, path)
 		next.ServeHTTP(w, r)
 	})
 }

@@ -5,10 +5,11 @@ package sub
 import (
 	"encoding/base64"
 	"fmt"
+	"net"
+	"net/netip"
 	"net/url"
 	"strconv"
 	"strings"
-	"time"
 
 	"revhub/internal/model"
 )
@@ -16,7 +17,7 @@ import (
 // Links возвращает ссылки клиента. Пустой список — легальный ответ:
 // клиент выключен, истёк или у него нет активных инбаундов.
 func Links(st model.State, c model.Client) []string {
-	if !c.Enabled || Expired(c) {
+	if !c.Enabled || c.Expired() {
 		return nil
 	}
 	var out []string
@@ -29,8 +30,15 @@ func Links(st model.State, c model.Client) []string {
 			continue
 		}
 		host, port := hostPort(node.PublicAddr, in.Port)
-		if in.Kind == "vless" {
+		switch in.Kind {
+		case model.InboundVLESS, "":
 			out = append(out, vlessLink(in, node, host, port, c, st))
+		case model.InboundWireGuard:
+			// Порт узла может быть портом панели или TCP-инбаунда.
+			peer, ok := c.WireGuard[in.ID]
+			if ok && in.WireGuard != nil && node.PublicAddr != "" {
+				out = append(out, wireGuardLink(in, host, c, peer))
+			}
 		}
 	}
 	return out
@@ -41,15 +49,18 @@ func Payload(links []string) string {
 	return base64.StdEncoding.EncodeToString([]byte(strings.Join(links, "\n")))
 }
 
-func Expired(c model.Client) bool {
-	if c.ExpiresAt == "" {
-		return false
+// wireguard:// соответствует формату импорта v2rayN.
+func wireGuardLink(in model.Inbound, host string, c model.Client, peer model.WireGuardPeer) string {
+	q := url.Values{
+		"publickey": {in.WireGuard.PublicKey}, "presharedkey": {peer.PresharedKey},
+		"address": {peer.Address}, "mtu": {strconv.Itoa(model.DefaultWireGuardMTU)},
 	}
-	t, err := time.Parse(time.RFC3339, c.ExpiresAt)
-	if err != nil {
-		return true
+	u := url.URL{
+		Host: net.JoinHostPort(host, strconv.Itoa(in.Port)), RawQuery: q.Encode(),
+		Fragment: c.Email + "@" + in.Tag,
 	}
-	return time.Now().After(t)
+	// v2rayN декодирует userinfo как query, поэтому '+' в base64 экранируем явно.
+	return "wireguard://" + url.QueryEscape(peer.PrivateKey) + "@" + strings.TrimPrefix(u.String(), "//")
 }
 
 func vlessLink(in model.Inbound, node model.Node, host string, port int, c model.Client, st model.State) string {
@@ -86,7 +97,7 @@ func vlessLink(in model.Inbound, node model.Node, host string, port int, c model
 	if node.Name != "" {
 		name += " (" + node.Name + ")"
 	}
-	return fmt.Sprintf("vless://%s@%s:%d?%s#%s", c.UUID, host, port, q.Encode(), url.PathEscape(name))
+	return fmt.Sprintf("vless://%s@%s?%s#%s", c.UUID, net.JoinHostPort(host, strconv.Itoa(port)), q.Encode(), url.PathEscape(name))
 }
 
 func clientFlow(in model.Inbound, c model.Client) string {
@@ -100,12 +111,14 @@ func hostPort(publicAddr string, fallbackPort int) (string, int) {
 	if publicAddr == "" {
 		return "127.0.0.1", fallbackPort
 	}
-	i := strings.LastIndex(publicAddr, ":")
-	if i < 0 {
-		return publicAddr, fallbackPort
+	if host, port, err := net.SplitHostPort(publicAddr); err == nil {
+		if p, err := strconv.Atoi(port); err == nil && p > 0 && p <= 65535 {
+			return host, p
+		}
+		return host, fallbackPort
 	}
-	if p, err := strconv.Atoi(publicAddr[i+1:]); err == nil && p > 0 {
-		return publicAddr[:i], p
+	if addr, err := netip.ParseAddr(strings.Trim(publicAddr, "[]")); err == nil {
+		return addr.String(), fallbackPort
 	}
 	return publicAddr, fallbackPort
 }

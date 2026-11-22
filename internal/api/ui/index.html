@@ -46,6 +46,9 @@
   pre{background:#0a0d12;border:1px solid var(--bd);border-radius:6px;padding:12px;overflow:auto;max-height:62vh;white-space:pre}
   .toast{position:fixed;right:16px;bottom:16px;max-width:46vw;background:var(--card);border:1px solid var(--bd);border-left:3px solid var(--acc2);padding:10px 14px;border-radius:6px;white-space:pre-wrap;z-index:9}
   .toast.err{border-left-color:var(--err)}
+  dialog{background:var(--card);color:inherit;border:1px solid var(--bd);border-radius:8px;width:min(640px,calc(100vw - 32px));box-sizing:border-box}
+  dialog::backdrop{background:#0008}
+  dialog textarea{min-height:110px}
   .hint{color:var(--mut);font-size:12px;margin:2px 0 14px}
 </style>
 </head>
@@ -79,6 +82,7 @@ const SCHEMA = {
   inbounds: [
     {k:'id', l:'id'}, {k:'node_id', l:'Узел', ref:'nodes'}, {k:'tag', l:'tag'},
     {k:'name', l:'Имя'}, {k:'enabled', l:'вкл', bool:true},
+    {k:'kind', l:'Протокол', sel:['vless','wireguard'], labels:{vless:'VLESS',wireguard:'WireGuard'}},
     {k:'listen', l:'listen'}, {k:'port', l:'порт', num:true},
     {k:'transport', l:'транспорт', sel:['tcp','ws','xhttp']},
     {k:'security', l:'security', sel:['reality','tls','none']},
@@ -132,8 +136,9 @@ const SCHEMA = {
 const GROUPS = {
   nodes: [['Основное',['id','name','role','public_addr','core']],
           ['Управление по SSH',['ssh_addr','ssh_user','ssh_auth','ssh_key_file']]],
-  inbounds: [['Основное',['id','node_id','tag','name','enabled']],
-             ['Подключение',['listen','port','transport','security','flow','path']],
+  inbounds: [['Основное',['id','node_id','tag','name','enabled','kind']],
+             ['Подключение',['listen','port']],
+             ['VLESS',['transport','security','flow','path']],
              ['TLS',['cert_source','domain','ip','cert_file','key_file']],
              ['Reality',['sni','dest','private_key','public_key','short_id']]],
   tunnels: [['Основное',['id','name','kind','from_node_id','to_node_id','enabled','mark']],
@@ -256,7 +261,7 @@ function summaryOf(tab,r){
               r.last_check?('проверен '+r.last_check.slice(11,19)):''].filter(Boolean).join(' · ');
     }
     case 'inbounds':
-      return [nodeLabel(r.node_id), (r.transport||'tcp')+'/'+(r.security||'none'),
+      return [nodeLabel(r.node_id), r.kind==='wireguard'?'WireGuard / UDP':'VLESS / '+(r.transport||'tcp')+'/'+(r.security||'none'),
               ':'+(r.port||'?'), r.enabled?'':'выключен'].filter(Boolean).join(' · ');
     case 'tunnels': {
       const who = r.kind==='wg' ? 'слушает '+(r.to_node_id||'?') : 'слушает '+(r.from_node_id||'?');
@@ -288,7 +293,7 @@ function summaryOf(tab,r){
 function actions(tab,i,r){
   const stop = 'event.stopPropagation();';
   let b = '';
-  if(tab==='inbounds') b += `<button class="b" title="ключи reality" onclick="${stop}genReality(${i})">🔑</button>`;
+  if(tab==='inbounds' && r.kind!=='wireguard' && r.security==='reality') b += `<button class="b" title="ключи reality" onclick="${stop}genReality(${i})">🔑</button>`;
   if(tab==='tunnels') b += `<button class="b" title="ключи WireGuard" onclick="${stop}genWG(${i})">🔑</button>`;
   if(tab==='clients') b += `<button class="b" title="UUID" onclick="${stop}genUUID(${i})">🆔</button>
     <button class="b" title="токен подписки" onclick="${stop}genToken(${i})">🎫</button>
@@ -304,6 +309,7 @@ function actions(tab,i,r){
 function bodyOf(tab,i,r){
   let html = '';
   for(const [title,keys] of GROUPS[tab]){
+    if(tab==='inbounds' && r.kind==='wireguard' && ['VLESS','TLS','Reality'].includes(title)) continue;
     if(tab==='tunnels'){
       if(title==='WireGuard' && r.kind==='vless') continue;
       if(title==='VLESS' && r.kind!=='vless') continue;
@@ -317,7 +323,22 @@ function bodyOf(tab,i,r){
     }
     html += '</div>';
   }
-  if(tab==='clients') html += `<div class="hint">Ссылка подписки: /sub/&lt;sub_token&gt; — клиент обновляет её сам.</div>`;
+  if(tab==='inbounds' && r.kind==='wireguard'){
+    const wg = r.wireguard || {};
+    html += `<div class="grp">WireGuard</div><div class="grid">
+      <div class="f"><label>Подсеть клиентов</label><input value="${esc(wg.subnet || '10.88.0.0/24')}" onchange="setWGSubnet(${i},this.value.trim())"></div>
+      <div class="f wide"><label>Публичный ключ сервера</label><input readonly value="${esc(wg.public_key)}" placeholder="Генерируется при сохранении"></div>
+    </div>`;
+  }
+  if(tab==='clients'){
+    const addresses = (r.inbounds||[]).map(id=>{
+      const inbound = (ST.inbounds||[]).find(x=>x.id===id);
+      const peer = r.wireguard?.[id];
+      return inbound?.kind==='wireguard' && peer ? `${inbound.tag}: ${peer.address}` : '';
+    }).filter(Boolean);
+    if(addresses.length) html += `<div class="hint">WireGuard: ${esc(addresses.join(' · '))}</div>`;
+    html += `<div class="hint">UUID, токен подписки и ключи выбранных WireGuard-инбаундов заполняются при сохранении. Кнопка «sub» открывает ссылки.</div>`;
+  }
   return html;
 }
 
@@ -325,7 +346,7 @@ function cell(tab,i,r,f){
   const val = r[f.k];
   const on = `onchange="edit('${tab}',${i},'${f.k}',this)"`;
   if(f.bool) return `<input type="checkbox" ${val?'checked':''} ${on}>`;
-  if(f.sel) return `<select ${on}>${f.sel.map(o=>`<option ${o===val?'selected':''} value="${esc(o)}">${esc(o||'—')}</option>`).join('')}</select>`;
+  if(f.sel) return `<select ${on}>${f.sel.map(o=>`<option ${o===val?'selected':''} value="${esc(o)}">${esc(f.labels?.[o]||o||'—')}</option>`).join('')}</select>`;
   if(f.ref){
     const opts = ['',...(ST[f.ref]||[]).map(n=>n.id)];
     return `<select ${on}>${opts.map(o=>`<option ${o===val?'selected':''} value="${esc(o)}">${o?esc(nodeLabel(o)):'—'}</option>`).join('')}</select>`;
@@ -340,10 +361,11 @@ function cell(tab,i,r,f){
     const pool = ST[f.multi]||[];
     const chosen = val||[];
     if(!pool.length) return '<span class="mut">сначала создай инбаунд</span>';
-    return '<div class="ms">' + pool.map(x=>{
+    return '<div class="ms">' + pool.map((x,idx)=>{
       const id = x.id, label = x.tag || x.name || x.id;
+      const protocol = x.kind==='wireguard' ? 'WireGuard' : 'VLESS';
       return `<label><input type="checkbox" ${chosen.includes(id)?'checked':''}
-        onchange="toggleMember('${tab}',${i},'${f.k}','${esc(id)}',this.checked)"> ${esc(label)}</label>`;
+        onchange="toggleMember('${tab}',${i},'${f.k}',${idx},this.checked)"> ${esc(label)} (${protocol})</label>`;
     }).join('') + '</div>';
   }
   if(f.lines) return `<textarea ${on}>${esc((val||[]).join('\n'))}</textarea>`;
@@ -358,8 +380,13 @@ function edit(tab,i,key,el){
     const f = SCHEMA[tab].find(x=>x.k===key);
     v = (f && f.lines) ? el.value.split(/[\n,]+/).map(s=>s.trim()).filter(Boolean) : el.value;
   }
+  const row = ST[tab][i];
   ST[tab][i][key] = v;
-  if(key==='kind'){ render(); return; }          // меняется состав секций
+  if(key==='kind' && tab==='inbounds'){
+    if(v==='wireguard' && row.port===443) row.port=51820;
+    if(v==='vless' && row.port===51820) row.port=443;
+  }
+  if(key==='kind' || key==='security'){ render(); return; }
   if(key==='enabled' || key==='node_id' || key==='outbound' || key==='mark'){ refreshHeader(); return; }
 }
 function refreshHeader(){
@@ -370,7 +397,12 @@ function refreshHeader(){
     card.querySelector('.sum').textContent = summaryOf(TAB,r);
   });
 }
-function toggleMember(tab,i,key,id,checked){
+function setWGSubnet(i,subnet){
+  const inbound = ST.inbounds[i];
+  inbound.wireguard = {...inbound.wireguard, subnet};
+}
+function toggleMember(tab,i,key,idx,checked){
+  const id = ST.inbounds[idx].id;
   const r = ST[tab][i];
   const list = new Set(r[key]||[]);
   checked ? list.add(id) : list.delete(id);
@@ -392,7 +424,7 @@ function addRow(tab){
   if(tab==='nodes'){ el.role='both'; el.core='xray'; el.public_addr='host.example.com:443'; }
   if(tab==='inbounds'){ el.listen='0.0.0.0'; el.port=443; el.transport='tcp'; el.security='tls'; el.cert_source='acme'; el.enabled=true; }
   if(tab==='tunnels'){ el.kind='wg-reverse'; el.enabled=true; el.keepalive=25; el.listen_port=51820; el.egress_iface='ens3'; el.forward_policy=true; }
-  if(tab==='clients'){ el.enabled=true; el.flow='xtls-rprx-vision'; }
+  if(tab==='clients'){ el.enabled=true; }
   if(tab==='routes'){ el.enabled=true; el.outbound='direct'; }
   (ST[tab] = ST[tab]||[]).push(el);
   OPEN.add(el.id);
@@ -514,7 +546,7 @@ function val(id){ const el = document.getElementById(id); return el ? el.value.t
 function hintFor(tab){
   return {
     nodes:'Узел — хост в сети. Панель ходит на него по SSH: ставит ядро и wireguard, кладёт конфиг и проверяет. Статус обновляется фоном каждые 20 секунд.',
-    inbounds:'VLESS-приём. TLS по умолчанию: выбери сертификат — acme (домен), selfsigned (IP) или file (свои файлы). Reality — отдельный, осознанный выбор; для ws/xhttp нужен path.',
+    inbounds:'Выбери VLESS или WireGuard. WireGuard слушает UDP, ключ сервера создаётся при сохранении.',
     tunnels:'wg — слушает to, звонит from. wg-reverse — наоборот (нужно, если to за NAT). Трафик всегда from → to.',
     clients:'UUID и sub_token создаются сами при сохранении, если пусты.',
     routes:'Порядок = приоритет, первый матч выигрывает. Открой карточку, чтобы увидеть условия.'
@@ -522,22 +554,30 @@ function hintFor(tab){
 }
 
 async function genReality(i){
-  const k = await api('/api/gen?what=reality');
+  const k = await api('/api/gen?what=reality',{method:'POST'});
   Object.assign(ST.inbounds[i], {private_key:k.private, public_key:k.public, short_id:k.short_id});
   render(); toast('reality-ключи подставлены — не забудь сохранить');
 }
 async function genWG(i){
-  const a = await api('/api/gen?what=wg'), b = await api('/api/gen?what=wg');
+  const a = await api('/api/gen?what=wg',{method:'POST'}), b = await api('/api/gen?what=wg',{method:'POST'});
   Object.assign(ST.tunnels[i], {from_key_private:a.private, from_key_public:a.public,
                                 to_key_private:b.private, to_key_public:b.public});
   render(); toast('ключи WireGuard подставлены — не забудь сохранить');
 }
-async function genUUID(i){ const k = await api('/api/gen?what=uuid'); ST.clients[i].uuid=k.uuid; render(); }
-async function genToken(i){ const k = await api('/api/gen?what=token'); ST.clients[i].sub_token=k.token; render(); }
+async function genUUID(i){ const k = await api('/api/gen?what=uuid',{method:'POST'}); ST.clients[i].uuid=k.uuid; render(); }
+async function genToken(i){ const k = await api('/api/gen?what=token',{method:'POST'}); ST.clients[i].sub_token=k.token; render(); }
 async function subLinks(i){
   try{
     const j = await api('/api/sub-link?client='+encodeURIComponent(ST.clients[i].id));
-    toast(`URL подписки: ${location.origin}${j.url}\nссылок: ${j.count}\n\n${j.links.join('\n')}`);
+    const dialog = document.createElement('dialog');
+    dialog.innerHTML = `<form method="dialog"><div class="f"><label for="sub-url">URL подписки</label><input id="sub-url" readonly></div>
+      <div class="f"><label for="sub-links">Ссылки подключения</label><textarea id="sub-links" readonly></textarea></div>
+      <div class="row"><button class="b p">Закрыть</button></div></form>`;
+    dialog.querySelector('#sub-url').value = location.origin + j.url;
+    dialog.querySelector('#sub-links').value = (j.links||[]).join('\n');
+    dialog.addEventListener('close',()=>dialog.remove(),{once:true});
+    document.body.appendChild(dialog);
+    dialog.showModal();
   }catch(e){ toast(e.message, true); }
 }
 
