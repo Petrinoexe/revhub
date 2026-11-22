@@ -5,7 +5,6 @@
 package sshx
 
 import (
-	"bytes"
 	"crypto/sha256"
 	"encoding/base64"
 	"errors"
@@ -116,11 +115,8 @@ func (c *Client) Run(cmd string) (string, error) {
 		return "", err
 	}
 	defer sess.Close()
-	var out bytes.Buffer
-	sess.Stdout = &out
-	sess.Stderr = &out
-	err = sess.Run(cmd)
-	res := out.String()
+	out, err := sess.CombinedOutput(cmd)
+	res := string(out)
 	if err != nil {
 		return res, fmt.Errorf("%s: %w: %s", firstLine(cmd), err, tail(res, 400))
 	}
