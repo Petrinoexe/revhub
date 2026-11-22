@@ -333,7 +333,7 @@ func setupTLS(o Options, r *runner) (*tlsCfg, error) {
 		cfg.sni = ip
 		cfg.certFile = filepath.Join(tlsDir, "ip", "fullchain.pem")
 		cfg.keyFile = filepath.Join(tlsDir, "ip", "key.pem")
-		if err := r.acmeIP(ip, o.Email, o.ACMEHTTPPort); err != nil {
+		if err := r.acmeIP(ip, o.Email, o.ACMEHTTPPort, o.EtcDir); err != nil {
 			return nil, err
 		}
 		if o.DryRun {
@@ -401,15 +401,59 @@ func setupTLS(o Options, r *runner) (*tlsCfg, error) {
 	return nil, fmt.Errorf("неизвестный режим TLS %q", o.Mode)
 }
 
+// acmeScript ищет acme.sh: домашний каталог текущего пользователя, /root,
+// стандартные места из PATH. Пустая строка — не установлен.
+func acmeScript() string {
+	cands := []string{"/root/.acme.sh/acme.sh", "/usr/local/bin/acme.sh", "/usr/bin/acme.sh"}
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		cands = append([]string{filepath.Join(home, ".acme.sh", "acme.sh")}, cands...)
+	}
+	for _, p := range cands {
+		if st, err := os.Stat(p); err == nil && !st.IsDir() {
+			return p
+		}
+	}
+	if p, err := exec.LookPath("acme.sh"); err == nil {
+		return p
+	}
+	return ""
+}
+
+// ensureACME возвращает путь к acme.sh, при необходимости ставя его.
+//
+// Важно: `curl … | sh` без pipefail возвращает код sh, а не curl — неудачная
+// загрузка выглядела как успешная установка, и падало уже на вызове acme.sh
+// с "fork/exec /root/.acme.sh/acme.sh: no such file or directory".
+func (r *runner) ensureACME(email string) (string, error) {
+	if sh := acmeScript(); sh != "" {
+		return sh, nil
+	}
+	if r.dry {
+		return "/root/.acme.sh/acme.sh", nil
+	}
+	if email == "" {
+		email = "admin@localhost"
+	}
+	// HOME=/root фиксирует каталог установки, pipefail — ловит сбой curl.
+	if err := runCmd("bash", "-o", "pipefail", "-c",
+		`curl -fsSL --retry 3 https://get.acme.sh | HOME=/root sh -s email=`+email); err != nil {
+		return "", fmt.Errorf("acme.sh не установился: %w. "+
+			"Варианты: поставить вручную (curl https://get.acme.sh | sh) или "+
+			"выбрать TLS «самоподписанный на IP» — он не требует ACME", err)
+	}
+	sh := acmeScript()
+	if sh == "" {
+		return "", fmt.Errorf("acme.sh установился, но не найден ни в $HOME/.acme.sh, ни в /root/.acme.sh, ни в PATH")
+	}
+	return sh, nil
+}
+
 // acme выпускает сертификат через acme.sh — тот же путь, что у x-ui.
 func (r *runner) acme(o Options) error {
 	r.rep.Steps = append(r.rep.Steps, Step{Name: "ACME: acme.sh", Detail: "проверяю"})
-	sh := "/root/.acme.sh/acme.sh"
-	if _, err := os.Stat(sh); err != nil {
-		if err := r.run("bash", "-c",
-			`curl -sSL https://get.acme.sh | sh -s email=`+o.Email); err != nil {
-			return fmt.Errorf("acme.sh не установился: %w", err)
-		}
+	sh, err := r.ensureACME(o.Email)
+	if err != nil {
+		return err
 	}
 	issue := []string{sh, "--issue", "-d", o.Domain, "--keylength", "ec-256", "--server", "letsencrypt"}
 	switch o.ACME {
@@ -427,10 +471,27 @@ func (r *runner) acme(o Options) error {
 		return fmt.Errorf("выпуск сертификата не удался: %w", err)
 	}
 	tlsDir := filepath.Join(o.EtcDir, "tls")
-	return r.run(sh, "--install-cert", "-d", o.Domain, "--ecc",
+	if err := r.run(sh, "--install-cert", "-d", o.Domain, "--ecc",
 		"--fullchain-file", filepath.Join(tlsDir, "fullchain.pem"),
 		"--key-file", filepath.Join(tlsDir, "key.pem"),
-		"--reloadcmd", "systemctl restart xray revhub")
+		"--reloadcmd", "systemctl try-restart xray || true; systemctl try-restart revhub || true"); err != nil {
+		return err
+	}
+	return r.checkCert(filepath.Join(tlsDir, "fullchain.pem"), filepath.Join(tlsDir, "key.pem"))
+}
+
+// checkCert убеждается, что acme.sh действительно положил файлы: иначе панель
+// поднимется без TLS и молча упадёт при старте.
+func (r *runner) checkCert(certFile, keyFile string) error {
+	if r.dry {
+		return nil
+	}
+	for _, f := range []string{certFile, keyFile} {
+		if st, err := os.Stat(f); err != nil || st.Size() == 0 {
+			return fmt.Errorf("acme.sh не создал %s — сертификат не выпущен (проверь доступность :80 снаружи)", f)
+		}
+	}
+	return nil
 }
 
 // securityForMode переводит режим установки в значение security инбаунда:
@@ -448,18 +509,16 @@ func securityForMode(mode string) string {
 
 // acmeIP выпускает сертификат Let's Encrypt на голый IP: LE требует профиль
 // shortlived и допускает только HTTP-01 или TLS-ALPN-01 (DNS-01 для IP нет).
-func (r *runner) acmeIP(ip, email string, port int) error {
+func (r *runner) acmeIP(ip, email string, port int, etcDir string) error {
 	if port == 0 {
 		port = 80
 	}
 	if email == "" {
 		email = "admin@" + ip
 	}
-	sh := "/root/.acme.sh/acme.sh"
-	if _, err := os.Stat(sh); err != nil {
-		if err := r.run("bash", "-c", "curl -sSL https://get.acme.sh | sh -s email="+email); err != nil {
-			return fmt.Errorf("acme.sh не установился: %w", err)
-		}
+	sh, err := r.ensureACME(email)
+	if err != nil {
+		return err
 	}
 	// HTTP-01 поднимает свой листенер: занятый порт = непонятная ошибка ACME
 	if !r.dry && portBusy(port) {
@@ -472,10 +531,11 @@ func (r *runner) acmeIP(ip, email string, port int) error {
 		"--server", "letsencrypt", "--certificate-profile", "shortlived", "--days", "6", "--force"); err != nil {
 		return fmt.Errorf("выпуск на %s: %w (порт %d должен быть доступен снаружи)", ip, err, port)
 	}
+	certDir := filepath.Join(etcDir, "tls", "ip")
 	return r.run(sh, "--install-cert", "-d", ip, "--ecc",
-		"--fullchain-file", "/etc/revhub/tls/ip/fullchain.pem",
-		"--key-file", "/etc/revhub/tls/ip/key.pem",
-		"--reloadcmd", "systemctl restart xray revhub")
+		"--fullchain-file", filepath.Join(certDir, "fullchain.pem"),
+		"--key-file", filepath.Join(certDir, "key.pem"),
+		"--reloadcmd", "systemctl try-restart xray || true; systemctl try-restart revhub || true")
 }
 
 // ---------------------------------------------------------------- состояние

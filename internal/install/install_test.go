@@ -248,3 +248,34 @@ func TestPanelURL(t *testing.T) {
 		t.Errorf("URL панели = %q", got)
 	}
 }
+
+// acme.sh мог встать в $HOME/.acme.sh другого пользователя: ищем и там, а не
+// только в /root — иначе установка падает на «no such file or directory».
+func TestAcmeScriptFindsHome(t *testing.T) {
+	home := t.TempDir()
+	sh := filepath.Join(home, ".acme.sh", "acme.sh")
+	if err := os.MkdirAll(filepath.Dir(sh), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(sh, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
+	if got := acmeScript(); got != sh {
+		t.Errorf("acmeScript() = %q, ожидал %q", got, sh)
+	}
+}
+
+// В dry-run ничего не устанавливаем и не ходим в сеть, но путь возвращаем —
+// чтобы отчёт установки оставался читаемым.
+func TestEnsureACMEDryRunNoNetwork(t *testing.T) {
+	t.Setenv("HOME", t.TempDir()) // гарантируем, что acme.sh не найдётся
+	r := &runner{dry: true, rep: &Report{}}
+	sh, err := r.ensureACME("admin@example.com")
+	if err != nil {
+		t.Fatalf("dry-run не должен падать: %v", err)
+	}
+	if sh == "" {
+		t.Error("dry-run должен вернуть путь к acme.sh по умолчанию")
+	}
+}
