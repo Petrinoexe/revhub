@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>revhub — вход</title>
+<style>
+  :root{--bg:#0e1116;--card:#161b22;--bd:#26303a;--fg:#e6edf3;--mut:#8b949e;--acc2:#2f81f7;--err:#f85149}
+  body{margin:0;min-height:100vh;display:grid;place-items:center;background:var(--bg);color:var(--fg);
+       font:13px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace}
+  form{background:var(--card);border:1px solid var(--bd);border-radius:10px;padding:22px 24px;width:320px}
+  h1{font-size:15px;margin:0 0 4px}
+  p.hint{color:var(--mut);margin:0 0 16px;font-size:12px}
+  label{display:block;color:var(--mut);font-size:11px;margin:10px 0 3px}
+  input{width:100%;box-sizing:border-box;background:var(--bg);border:1px solid var(--bd);color:var(--fg);
+        padding:7px 9px;border-radius:5px;font:inherit}
+  button{margin-top:16px;width:100%;background:var(--acc2);border:0;color:#fff;padding:8px;border-radius:5px;
+         cursor:pointer;font:inherit}
+  .err{color:var(--err);margin-top:12px;font-size:12px;white-space:pre-wrap}
+</style>
+</head>
+<body>
+<form id="f">
+  <h1>revhub</h1>
+  <p class="hint">панель управления туннелями</p>
+  <label>пользователь</label>
+  <input id="u" value="admin" autocomplete="username" autofocus>
+  <label>пароль</label>
+  <input id="p" type="password" autocomplete="current-password">
+  <button type="submit" id="b">войти</button>
+  <div class="err" id="e"></div>
+</form>
+<script>
+document.getElementById('f').addEventListener('submit', async (ev)=>{
+  ev.preventDefault();
+  const e = document.getElementById('e'), b = document.getElementById('b');
+  e.textContent = ''; b.disabled = true;
+  try{
+    const r = await fetch('/api/login', {
+      method:'POST', headers:{'content-type':'application/json'},
+      body: JSON.stringify({user: document.getElementById('u').value,
+                            password: document.getElementById('p').value})
+    });
+    const j = await r.json().catch(()=>({}));
+    if(!r.ok){ e.textContent = (j.error || ('HTTP ' + r.status)); return; }
+    location.href = '/';
+  }catch(err){ e.textContent = String(err); }
+  finally{ b.disabled = false; }
+});
+</script>
+</body>
+</html>
