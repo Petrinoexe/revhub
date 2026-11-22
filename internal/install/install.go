@@ -13,6 +13,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -571,7 +572,11 @@ func (r *runner) acme(o Options) error {
 		_ = r.run(sh, "--register-account", "-m", o.Email)
 	}
 	if err := r.run(issue[0], issue[1:]...); err != nil {
-		return fmt.Errorf("выпуск сертификата не удался: %w", err)
+		if !acmeSkipExit(err) && !acmeCertExists(sh, o.Domain) {
+			return fmt.Errorf("выпуск сертификата не удался: %w", err)
+		}
+		r.rep.Steps = append(r.rep.Steps, Step{Name: "  выпуск",
+			Detail: "сертификат уже выпущен, acme.sh пропустил обновление"})
 	}
 	return r.installCert(sh, o.Domain, filepath.Join(o.EtcDir, "tls"))
 }
@@ -610,6 +615,29 @@ func (r *runner) installCert(sh, domain, certDir string) error {
 			Detail: "acme.sh вернул ошибку, но сертификат на месте: " + err.Error()})
 	}
 	return nil
+}
+
+// acmeSkipExit — acme.sh завершился с кодом 2 (RENEW_SKIP): сертификат ещё
+// живой, обновление не требуется. Для нас это успех, а не сбой выпуска.
+func acmeSkipExit(err error) bool {
+	var ee *exec.ExitError
+	if errors.As(err, &ee) {
+		return ee.ExitCode() == 2
+	}
+	return false
+}
+
+// acmeCertExists — лежит ли у acme.sh уже выпущенный сертификат (рядом с самим
+// скриптом, в <name>_ecc или <name>). Нужен для случая, когда acme.sh вернул
+// ошибку, но файлы на месте.
+func acmeCertExists(sh, name string) bool {
+	dir := filepath.Dir(sh)
+	for _, d := range []string{name + "_ecc", name} {
+		if st, err := os.Stat(filepath.Join(dir, d, "fullchain.cer")); err == nil && st.Size() > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // checkCert убеждается, что acme.sh действительно положил файлы: иначе панель
@@ -665,7 +693,12 @@ func (r *runner) acmeIP(o Options, ip string) error {
 	}
 	if err := r.run(sh, "--issue", "-d", ip, "--standalone", "--httpport", strconv.Itoa(port),
 		"--server", "letsencrypt", "--certificate-profile", "shortlived", "--days", "6"); err != nil {
-		return fmt.Errorf("выпуск на %s: %w (порт %d должен быть доступен снаружи)", ip, err, port)
+		// код 2 (RENEW_SKIP) и уже лежащий сертификат — не провал выпуска
+		if !acmeSkipExit(err) && !acmeCertExists(sh, ip) {
+			return fmt.Errorf("выпуск на %s: %w (порт %d должен быть доступен снаружи)", ip, err, port)
+		}
+		r.rep.Steps = append(r.rep.Steps, Step{Name: "  выпуск",
+			Detail: "сертификат уже выпущен, acme.sh пропустил обновление"})
 	}
 	return r.installCert(sh, ip, filepath.Join(o.EtcDir, "tls", "ip"))
 }

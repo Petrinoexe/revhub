@@ -432,3 +432,73 @@ exit 0
 		}
 	}
 }
+
+// acme.sh завершает --issue с кодом 2 (RENEW_SKIP), когда сертификат ещё жив.
+// Это не провал: установка должна разложить файлы и идти дальше.
+func TestAcmeIPSkipExit(t *testing.T) {
+	dir := t.TempDir()
+	sh := filepath.Join(dir, "acme", "acme.sh")
+	if err := os.MkdirAll(filepath.Dir(sh), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	stub := `#!/bin/sh
+case " $* " in
+  *" --issue "*)
+    # как настоящий acme.sh: файлы уже есть, обновление не нужно
+    mkdir -p "$(dirname "$0")/203.0.113.7_ecc"
+    printf 'CERT\n' > "$(dirname "$0")/203.0.113.7_ecc/fullchain.cer"
+    printf 'KEY\n'  > "$(dirname "$0")/203.0.113.7_ecc/203.0.113.7.key"
+    exit 2
+    ;;
+  *" --install-cert "*)
+    fc=""; kf=""
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --fullchain-file) fc="$2"; shift 2 ;;
+        --key-file) kf="$2"; shift 2 ;;
+        *) shift ;;
+      esac
+    done
+    [ -n "$fc" ] && printf 'CERT\n' > "$fc"
+    [ -n "$kf" ] && printf 'KEY\n' > "$kf"
+    exit 0
+    ;;
+esac
+exit 0
+`
+	if err := os.WriteFile(sh, []byte(stub), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	o := Defaults()
+	o.EtcDir, o.UnitDir = dir, filepath.Join(dir, "units")
+	o.ACMEHTTPPort = 8088
+	r := &runner{rep: &Report{}}
+	if err := r.acmeIP(o, "203.0.113.7"); err != nil {
+		t.Fatalf("код 2 от --issue не должен валить установку: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "tls", "ip", "fullchain.pem")); err != nil {
+		t.Errorf("сертификат не разложен: %v", err)
+	}
+	got := false
+	for _, st := range r.rep.Steps {
+		if strings.Contains(st.Detail, "пропустил обновление") {
+			got = true
+		}
+	}
+	if !got {
+		t.Error("в отчёте нет примечания про пропущенное обновление")
+	}
+}
+
+func TestAcmeSkipExitCodes(t *testing.T) {
+	err2 := runCmd("sh", "-c", "exit 2")
+	if !acmeSkipExit(err2) {
+		t.Error("код 2 должен считаться RENEW_SKIP")
+	}
+	if acmeSkipExit(runCmd("sh", "-c", "exit 1")) {
+		t.Error("код 1 не должен считаться RENEW_SKIP")
+	}
+	if acmeSkipExit(nil) {
+		t.Error("nil не ошибка и не skip")
+	}
+}
