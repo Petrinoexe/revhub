@@ -127,6 +127,75 @@ func TestBootstrapFullFlow(t *testing.T) {
 	}
 }
 
+type acmeDirRunner struct {
+	*fakeRunner
+	dir         string
+	created     bool
+	skipRenewal bool
+}
+
+func (r *acmeDirRunner) Run(cmd string) (string, error) {
+	if cmd == "mkdir -p "+r.dir {
+		r.created = true
+		return "", nil
+	}
+	if strings.Contains(cmd, "--install-cert") {
+		if !r.created {
+			return "", fmt.Errorf("cannot touch %s/key.pem: No such file or directory", r.dir)
+		}
+		return "", nil
+	}
+	if strings.HasPrefix(cmd, "test -s /etc/revhub/tls/") {
+		return "", fmt.Errorf("missing")
+	}
+	if strings.Contains(cmd, "--issue -d") && r.skipRenewal {
+		if strings.Contains(cmd, "rc=$?") && strings.Contains(cmd, "-eq 2") {
+			return "Skipping. Next renewal time", nil
+		}
+		return "Skipping. Next renewal time", fmt.Errorf("exit status 2")
+	}
+	if strings.HasPrefix(cmd, "test -x /root/.acme.sh/acme.sh") || strings.Contains(cmd, "--issue -d") || strings.Contains(cmd, "--set-default-ca") {
+		return "", nil
+	}
+	if strings.HasPrefix(cmd, "ss -ltnu") {
+		return "0", nil
+	}
+	return r.fakeRunner.Run(cmd)
+}
+
+func TestBootstrapACMECreatesDestinationDirectory(t *testing.T) {
+	for _, tc := range []struct {
+		name, dir string
+		configure func(*Plan)
+	}{
+		{"domain", "/etc/revhub/tls", func(p *Plan) { p.ACMEDomain = "vpn.example.com" }},
+		{"ip", "/etc/revhub/tls/ip", func(p *Plan) { p.ACMEIP = "198.51.100.1" }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := &acmeDirRunner{fakeRunner: newFakeRunner(), dir: tc.dir}
+			p := planFor(t)
+			tc.configure(&p)
+			_, err := RunWith(func(sshx.Target) (Runner, error) { return r, nil }, sshx.Target{Addr: "test"}, p, nil)
+			if err != nil {
+				t.Fatalf("bootstrap: %v", err)
+			}
+		})
+	}
+}
+
+func TestBootstrapACMERetryAfterRenewSkip(t *testing.T) {
+	r := &acmeDirRunner{fakeRunner: newFakeRunner(), dir: "/etc/revhub/tls", skipRenewal: true}
+	p := planFor(t)
+	p.ACMEDomain = "vpn.example.com"
+	_, err := RunWith(func(sshx.Target) (Runner, error) { return r, nil }, sshx.Target{Addr: "test"}, p, nil)
+	if err != nil {
+		t.Fatalf("retry after prior issue: %v", err)
+	}
+	if !r.created {
+		t.Fatal("certificate was not installed")
+	}
+}
+
 func TestBootstrapUIDWithBanner(t *testing.T) {
 	f := newFakeRunner()
 	banner := "\nWelcome to the server\n__REVHUB_UID__=0\n"

@@ -232,8 +232,11 @@ func RunWith(open Open, t sshx.Target, p Plan, logf func(string)) (*Result, erro
 			} else {
 				issue += " --standalone"
 			}
-			if _, err := cli.Run(issue); err != nil {
+			if _, err := cli.Run(issue + `; rc=$?; [ "$rc" -eq 0 ] || [ "$rc" -eq 2 ]`); err != nil {
 				return "", err
+			}
+			if _, err := cli.Run("mkdir -p /etc/revhub/tls"); err != nil {
+				return "", fmt.Errorf("создание каталога сертификата: %w", err)
 			}
 			install := "/root/.acme.sh/acme.sh --install-cert -d " + p.ACMEDomain + " --ecc " +
 				"--fullchain-file /etc/revhub/tls/fullchain.pem --key-file /etc/revhub/tls/key.pem " +
@@ -273,8 +276,11 @@ func RunWith(open Open, t sshx.Target, p Plan, logf func(string)) (*Result, erro
 			// --certificate-profile shortlived — требование LE для IP-сертификатов
 			issue := fmt.Sprintf("/root/.acme.sh/acme.sh --issue -d %s --standalone --httpport %d "+
 				"--server letsencrypt --certificate-profile shortlived --days 6 --force", p.ACMEIP, port)
-			if _, err := cli.Run(issue); err != nil {
+			if _, err := cli.Run(issue + `; rc=$?; [ "$rc" -eq 0 ] || [ "$rc" -eq 2 ]`); err != nil {
 				return "", fmt.Errorf("выпуск: %w (IP должен быть доступен снаружи по порту %d)", err, port)
+			}
+			if _, err := cli.Run("mkdir -p /etc/revhub/tls/ip"); err != nil {
+				return "", fmt.Errorf("создание каталога сертификата: %w", err)
 			}
 			install := fmt.Sprintf("/root/.acme.sh/acme.sh --install-cert -d %s --ecc "+
 				"--fullchain-file /etc/revhub/tls/ip/fullchain.pem --key-file /etc/revhub/tls/ip/key.pem "+
