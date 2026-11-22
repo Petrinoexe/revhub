@@ -225,6 +225,10 @@ func Run(o Options) (*Report, error) {
 	// 7. права: файлы уже созданы, выдаём панели ровно нужное
 	r.step("права панели", func() (string, error) { return r.grantPanelAccess(o) })
 
+	// 7b. применение конфига: панель непривилегированная, а ядру и wg-quick
+	// нужен root — выдаём ровно одну команду через sudo без пароля.
+	r.step("применение конфига панелью", func() (string, error) { return r.grantApplyLocal(o) })
+
 	// 8. юниты
 	r.step("systemd-юниты", func() (string, error) {
 		if err := os.MkdirAll(o.UnitDir, 0o755); err != nil {
@@ -276,6 +280,23 @@ func Run(o Options) (*Report, error) {
 		}
 		rep.ArtifactsDir = dir
 		return fmt.Sprintf("%d файла в %s", len(files), dir), nil
+	})
+
+	if err := r.firstStepError(); err != nil {
+		return rep, err
+	}
+
+	// применение конфига на этом узле: без него юнит xray стартует без файла
+	// конфига и падает — «инбаунд не работает» сразу после установки
+	r.step("применение конфига", func() (string, error) {
+		if o.DryRun || o.NoApply || o.NoStart {
+			return "пропущено флагами --dry-run/--no-apply/--no-start", errSkip
+		}
+		out, err := applyArtifacts(rep.ArtifactsDir)
+		if err != nil {
+			return out, fmt.Errorf("%w (вывод: %s)", err, out)
+		}
+		return "xray перезапущен с конфигом узла", nil
 	})
 
 	if err := r.firstStepError(); err != nil {
@@ -800,6 +821,46 @@ func (r *runner) grantPanelAccess(o Options) (string, error) {
 	return fmt.Sprintf("%s: %s, %s", o.PanelUser, o.EtcDir, o.StateDir), nil
 }
 
+// grantApplyLocal разрешает панели применить конфиг через собственный бинарь:
+// `sudo -n <prefix>/bin/revhub apply-local`. Ровно одна команда, без аргументов
+// в правиле (бинáрь сам проверяет id узла), без shell.
+func (r *runner) grantApplyLocal(o Options) (string, error) {
+	if o.PanelUser == "" || o.PanelUser == "root" {
+		return "не нужно: панель работает от root", nil
+	}
+	bin := filepath.Join(o.Prefix, "bin", "revhub")
+	path := "/etc/sudoers.d/revhub"
+	body := fmt.Sprintf(`# revhub: панель применяет конфиг ядра и WireGuard через собственный бинарь
+# (apply.sh из каталога панели root не исполняет — артефакты рендерятся заново)
+%s ALL=(root) NOPASSWD: %s apply-local
+`, o.PanelUser, bin)
+	if r.dry {
+		return "будет " + path + ": " + o.PanelUser + " → " + bin + " apply-local", nil
+	}
+	if os.Geteuid() != 0 {
+		return "пропущено: нужен root, чтобы записать " + path, errSkip
+	}
+	if err := os.MkdirAll("/etc/sudoers.d", 0o750); err != nil {
+		return "", err
+	}
+	tmp := path + ".revhub"
+	if err := os.WriteFile(tmp, []byte(body), 0o440); err != nil {
+		return "", err
+	}
+	// синтаксис проверяем до установки: битый файл в sudoers.d ломает sudo целиком
+	if _, err := lookPath("visudo"); err == nil {
+		if err := runCmd("visudo", "-cf", tmp); err != nil {
+			_ = os.Remove(tmp)
+			return "", fmt.Errorf("visudo отверг правило: %w", err)
+		}
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return "", err
+	}
+	return fmt.Sprintf("%s: %s может выполнить %s apply-local", path, o.PanelUser, bin), nil
+}
+
 // fixCertPerms делает сертификат читаемым для панели, а ключ — только группе.
 func (r *runner) fixCertPerms(o Options, certFile, keyFile string) {
 	if r.dry {
@@ -1121,14 +1182,14 @@ Restart=on-failure
 RestartSec=3
 StateDirectory=revhub
 StateDirectoryMode=0750
-NoNewPrivileges=true
 PrivateTmp=true
 ProtectHome=read-only
 ProtectSystem=strict
 # каталоги, а не файлы: панель пишет состояние через временный файл рядом
 ReadWritePaths=%[1]s %[7]s
+# sudo нужен для применения конфига (apply-local); NoNewPrivileges и
+# ограничение CapabilityBoundingSet его бы заблокировали.
 AmbientCapabilities=CAP_NET_BIND_SERVICE
-CapabilityBoundingSet=CAP_NET_BIND_SERVICE
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
 LockPersonality=true
 
@@ -1370,4 +1431,27 @@ func samePath(a, b string) bool {
 	ra, err1 := filepath.EvalSymlinks(a)
 	rb, err2 := filepath.EvalSymlinks(b)
 	return err1 == nil && err2 == nil && ra == rb
+}
+
+// applyArtifacts запускает apply.sh из каталога артефактов. Установщик уже
+// работает от root, поэтому sudo не нужен; PATH задаём явно — под root через
+// sudo/ssh он не всегда содержит /usr/local/bin, где лежит ядро.
+func applyArtifacts(dir string) (string, error) {
+	if dir == "" {
+		return "", fmt.Errorf("каталог артефактов не создан")
+	}
+	cmd := exec.Command("bash", "apply.sh")
+	cmd.Dir = dir
+	xrayBin := "xray"
+	for _, c := range []string{"/usr/local/bin/xray", "/usr/bin/xray"} {
+		if st, err := os.Stat(c); err == nil && !st.IsDir() {
+			xrayBin = c
+			break
+		}
+	}
+	cmd.Env = append(os.Environ(),
+		"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+		"XRAY_BIN="+xrayBin)
+	out, err := cmd.CombinedOutput()
+	return strings.TrimSpace(string(out)), err
 }

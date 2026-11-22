@@ -1,6 +1,6 @@
-// Package api — HTTP-слой панели. Ничего не применяет на узле: только
-// состояние, генерация ключей, рендер артефактов и dry-run маршрутов.
-// Применение — руками через apply.sh из out/<node>/ (см. docs/ARCHITECTURE.md).
+// Package api — HTTP-слой панели: состояние, генерация ключей, dry-run
+// маршрутов. Сохранение состояния сразу запускает применение конфигурации
+// (локальный узел — через привилегированный помощник, остальные — по SSH).
 package api
 
 import (
@@ -14,13 +14,16 @@ import (
 	"strings"
 	"time"
 
+	"revhub/internal/apply"
 	"revhub/internal/auth"
+	"revhub/internal/diag"
 	"revhub/internal/gen"
 	"revhub/internal/model"
 	"revhub/internal/monitor"
 	"revhub/internal/provision"
 	"revhub/internal/route"
 	"revhub/internal/secrets"
+	"revhub/internal/sshx"
 	"revhub/internal/store"
 	"revhub/internal/sub"
 )
@@ -37,6 +40,7 @@ type Server struct {
 	Secrets   *secrets.Store
 	Prov      *provision.Service
 	Mon       *monitor.Monitor
+	Apply     *apply.Service
 	LocalNode string
 	TLSCert   string
 	TLSKey    string
@@ -61,6 +65,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/node/secret", s.setSecret)
 	mux.HandleFunc("POST /api/node/provision", s.provisionNode)
 	mux.HandleFunc("POST /api/node/check", s.checkNodes)
+	mux.HandleFunc("POST /api/node/diag", s.diagNode)
+	mux.HandleFunc("GET /api/apply", s.applyStatus)
+	mux.HandleFunc("POST /api/apply", s.applyNow)
+	mux.HandleFunc("POST /api/tunnel/ping", s.tunnelPing)
 	mux.HandleFunc("GET /sub/{token}", s.subscription)
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte("ok\n"))
@@ -190,7 +198,124 @@ func (s *Server) putState(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusUnprocessableEntity, err.Error())
 		return
 	}
+	// Сохранение = применение. Отдельной вкладки рендера нет: панель сама
+	// обновляет артефакты и перезапускает ядро, а прогресс виден в шапке.
+	if s.Apply != nil {
+		s.Apply.Start("save")
+	}
 	writeJSON(w, http.StatusOK, s.Store.Snapshot())
+}
+
+func (s *Server) applyStatus(w http.ResponseWriter, r *http.Request) {
+	if s.Apply == nil {
+		writeErr(w, http.StatusServiceUnavailable, "применение не подключено")
+		return
+	}
+	writeJSON(w, http.StatusOK, s.Apply.Last())
+}
+
+func (s *Server) applyNow(w http.ResponseWriter, r *http.Request) {
+	if s.Apply == nil {
+		writeErr(w, http.StatusServiceUnavailable, "применение не подключено")
+		return
+	}
+	var req struct {
+		Node string `json:"node"`
+	}
+	if r.ContentLength > 0 {
+		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10)).Decode(&req); err != nil {
+			writeErr(w, http.StatusBadRequest, "не разобрал JSON: "+err.Error())
+			return
+		}
+	}
+	if req.Node != "" {
+		res, err := s.Apply.ApplyNode(req.Node)
+		if err != nil {
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"error": err.Error(), "node": res})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"node": res})
+		return
+	}
+	writeJSON(w, http.StatusOK, s.Apply.ApplyNow("manual"))
+}
+
+// diagNode проверяет узел на месте: ядро, применён ли конфиг, слушаются ли
+// порты, firewall и WireGuard.
+func (s *Server) diagNode(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Node string `json:"node"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10)).Decode(&req); err != nil {
+		writeErr(w, http.StatusBadRequest, "не разобрал JSON: "+err.Error())
+		return
+	}
+	node := req.Node
+	if node == "" {
+		node = s.LocalNode
+	}
+	st := s.Store.Snapshot()
+	rep, err := diag.Node(st, node, s.LocalNode, s.runners())
+	if err != nil {
+		writeErr(w, http.StatusUnprocessableEntity, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, rep)
+}
+
+// tunnelPing проверяет связь по туннелю: рукопожатие, пинг дальнего конца и
+// пинг внешнего хоста через выходной узел.
+func (s *Server) tunnelPing(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Tunnel string `json:"tunnel"`
+		Host   string `json:"host"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10)).Decode(&req); err != nil {
+		writeErr(w, http.StatusBadRequest, "не разобрал JSON: "+err.Error())
+		return
+	}
+	if req.Tunnel == "" {
+		writeErr(w, http.StatusBadRequest, "нужен tunnel")
+		return
+	}
+	rep, err := diag.Tunnel(s.Store.Snapshot(), req.Tunnel, req.Host, s.LocalNode, s.runners())
+	if err != nil {
+		writeErr(w, http.StatusUnprocessableEntity, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, rep)
+}
+
+// runners — доступ к узлам для диагностики: локальный узел проверяем на месте,
+// остальные по SSH с сохранённым секретом.
+func (s *Server) runners() diag.Runners {
+	return diag.Runners{
+		Local:      diag.Local{},
+		ConfigPath: os.Getenv("XRAY_CONFIG"), // песочница/нестандартный путь
+		RemoteFor: func(nodeID string) (diag.Runner, error) {
+			var node model.Node
+			for _, n := range s.Store.Snapshot().Nodes {
+				if n.ID == nodeID {
+					node = n
+				}
+			}
+			if node.ID == "" {
+				return nil, fmt.Errorf("узел %q не найден", nodeID)
+			}
+			if s.Secrets == nil {
+				return nil, fmt.Errorf("нет хранилища SSH-секретов")
+			}
+			sec, _ := s.Secrets.Get(nodeID)
+			cli, err := sshx.Dial(sshx.Target{
+				Addr: node.SSHAddr, User: node.SSHUser,
+				Password: sec.Password, KeyPEM: []byte(sec.PrivateKey), HostKey: node.HostKey,
+			})
+			if err != nil {
+				return nil, err
+			}
+			return cli, nil
+		},
+	}
 }
 
 func (s *Server) genKeys(w http.ResponseWriter, r *http.Request) {
@@ -410,6 +535,11 @@ func (s *Server) provisionNode(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"error": err.Error(), "report": rep})
 		return
+	}
+	// Узел добавлен: применяем свежий конфиг (локальный хаб — через sudo,
+	// выходной — по SSH), чтобы не осталось «настроено, но не запущено».
+	if s.Apply != nil {
+		s.Apply.Start("provision")
 	}
 	writeJSON(w, http.StatusOK, rep)
 }

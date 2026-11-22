@@ -563,6 +563,36 @@ func TestUnitRunsAsPanelUser(t *testing.T) {
 	}
 }
 
+// Юнит не должен запрещать sudo: именно им панель применяет конфиг ядра.
+func TestUnitAllowsSudoForApply(t *testing.T) {
+	o := Defaults()
+	o.PanelAddr, o.Mode, o.PanelTLS = "0.0.0.0:2096", TLSIP, true
+	u := revhubUnit(o, "")
+	for _, bad := range []string{"NoNewPrivileges=true", "CapabilityBoundingSet="} {
+		if strings.Contains(u, bad) {
+			t.Errorf("в юните осталось %q: sudo не сможет применить конфиг", bad)
+		}
+	}
+}
+
+// Правило sudoers ровно на одну команду, в dry-run — без записи в /etc.
+func TestGrantApplyLocalRule(t *testing.T) {
+	r := &runner{dry: true, rep: &Report{}}
+	got, err := r.grantApplyLocal(Options{Prefix: "/usr/local", PanelUser: "revhub"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"/etc/sudoers.d/revhub", "revhub", "/usr/local/bin/revhub apply-local"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("в отчёте нет %q: %s", want, got)
+		}
+	}
+	// root-панели правило не нужно
+	if s, _ := r.grantApplyLocal(Options{PanelUser: "root"}); !strings.Contains(s, "не нужно") {
+		t.Errorf("для root правило не должно ставиться: %s", s)
+	}
+}
+
 // В dry-run пользователя не создаём, но отчёт должен быть внятным.
 func TestEnsurePanelUserDry(t *testing.T) {
 	r := &runner{dry: true, rep: &Report{}}

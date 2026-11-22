@@ -67,10 +67,55 @@ func Artifacts(st model.State, nodeID string) ([]File, error) {
 	useXray := len(wgNames) == 0 || NeedsXray(st, nodeID)
 
 	files = append(files,
-		File{Name: "apply.sh", Content: applyScript(wgNames, useXray), Mode: 0o700},
+		File{Name: "apply.sh", Content: applyScript(wgNames, useXray, NodePorts(st, nodeID)), Mode: 0o700},
 		File{Name: "rollback.sh", Content: rollbackScript(wgNames, useXray), Mode: 0o700},
 	)
 	return files, nil
+}
+
+// NodePorts — порты, которые должны быть открыты снаружи на этом узле:
+// клиентские инбаунды и слушатели туннелей. Без них свежий VPS с ufw
+// принимает пакеты в пустоту, и «инбаунд не работает» выглядит как баг панели.
+func NodePorts(st model.State, nodeID string) []string {
+	seen := map[string]bool{}
+	var out []string
+	add := func(port int, proto string) {
+		if port <= 0 {
+			return
+		}
+		spec := fmt.Sprintf("%d/%s", port, proto)
+		if seen[spec] {
+			return
+		}
+		seen[spec] = true
+		out = append(out, spec)
+	}
+	for _, in := range st.Inbounds {
+		if !in.Enabled || in.NodeID != nodeID {
+			continue
+		}
+		proto := "tcp"
+		if in.Kind == model.InboundWireGuard {
+			proto = "udp"
+		}
+		add(in.Port, proto)
+	}
+	for _, t := range st.Tunnels {
+		if !t.Enabled || !t.Touches(nodeID) {
+			continue
+		}
+		switch t.Kind {
+		case model.TunnelWG, model.TunnelWGReverse:
+			if t.ListenerNode() == nodeID {
+				add(t.ListenPort, "udp")
+			}
+		case model.TunnelVLESS:
+			if t.ToNode == nodeID {
+				add(t.ListenPortT, "tcp")
+			}
+		}
+	}
+	return out
 }
 
 // NeedsXray identifies nodes with listeners or an Xray tunnel endpoint.
@@ -228,11 +273,26 @@ func pick(cond bool, a, b string) string {
 	return b
 }
 
-func applyScript(wgFiles []string, useXray bool) string {
+func applyScript(wgFiles []string, useXray bool, ports []string) string {
 	var b strings.Builder
 	b.WriteString("#!/usr/bin/env bash\n")
 	b.WriteString("# Сгенерировано revhub. Порядок важен: сначала туннели, потом ядро.\n")
 	b.WriteString("set -euo pipefail\ncd \"$(dirname \"$0\")\"\n")
+	if len(ports) > 0 {
+		// ufw по умолчанию есть на Ubuntu/Debian; firewalld трогаем, только если он
+		// действительно управляет этой машиной. Ошибки не валят применение.
+		b.WriteString("if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -qi '^Status: active'; then\n")
+		for _, p := range ports {
+			fmt.Fprintf(&b, "  ufw allow %q >/dev/null 2>&1 || true\n", p)
+		}
+		b.WriteString("fi\n")
+		b.WriteString("if command -v firewall-cmd >/dev/null 2>&1 && firewall-cmd --state >/dev/null 2>&1; then\n")
+		for _, p := range ports {
+			port, proto, _ := strings.Cut(p, "/")
+			fmt.Fprintf(&b, "  firewall-cmd --permanent --add-port=%q >/dev/null 2>&1 || true\n", port+"/"+proto)
+		}
+		b.WriteString("  firewall-cmd --reload >/dev/null 2>&1 || true\nfi\n")
+	}
 	if useXray {
 		b.WriteString(`XRAY_BIN=${XRAY_BIN:-xray}
 XRAY_CONFIG=${XRAY_CONFIG:-/usr/local/etc/xray/config.json}

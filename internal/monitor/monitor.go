@@ -39,8 +39,10 @@ func (m *Monitor) Start(ctx context.Context) {
 	if m.Timeout == 0 {
 		m.Timeout = 3 * time.Second
 	}
-	m.CheckNow()
 	go func() {
+		// Первую проверку делаем в горутине: пробинг узлов ждёт таймауты, и
+		// панель не должна из-за этого задерживать старт HTTP-сервера.
+		m.CheckNow()
 		t := time.NewTicker(m.Interval)
 		defer t.Stop()
 		for {

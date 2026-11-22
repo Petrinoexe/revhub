@@ -171,6 +171,43 @@ func TestArtifactsSet(t *testing.T) {
 	}
 }
 
+// Порты для firewall: клиентские инбаунды и слушатели туннелей, без дублей.
+func TestNodePortsCoversInboundsAndListeners(t *testing.T) {
+	var st model.State
+	st.Nodes = []model.Node{{ID: "hub"}, {ID: "exit"}}
+	st.Inbounds = []model.Inbound{
+		{ID: "in-1", NodeID: "hub", Tag: "vless", Kind: "vless", Port: 443, Enabled: true},
+		{ID: "in-2", NodeID: "hub", Tag: "wg", Kind: model.InboundWireGuard, Port: 51821, Enabled: true},
+		{ID: "in-3", NodeID: "hub", Tag: "off", Kind: "vless", Port: 8080, Enabled: false},
+		{ID: "in-4", NodeID: "exit", Tag: "other", Kind: "vless", Port: 8443, Enabled: true},
+	}
+	st.Tunnels = []model.Tunnel{{ID: "tn-1", Name: "eu", Kind: model.TunnelWGReverse,
+		FromNode: "hub", ToNode: "exit", Enabled: true, Subnet: "10.77.1.0/30", ListenPort: 51820}}
+
+	got := NodePorts(st, "hub")
+	want := []string{"443/tcp", "51821/udp", "51820/udp"}
+	if strings.Join(got, " ") != strings.Join(want, " ") {
+		t.Fatalf("порты хаба: %v, ожидалось %v", got, want)
+	}
+	if out := NodePorts(st, "exit"); strings.Join(out, " ") != "8443/tcp" {
+		t.Fatalf("порты выходного: %v (слушатель wg-reverse живёт на хабе)", out)
+	}
+}
+
+// apply.sh открывает порты сам: свежий VPS с ufw иначе «не пускает» клиентов.
+func TestApplyScriptOpensPorts(t *testing.T) {
+	s := applyScript(nil, false, []string{"443/tcp", "51820/udp"})
+	for _, want := range []string{"ufw status", `ufw allow "443/tcp"`, `ufw allow "51820/udp"`, "firewall-cmd --permanent --add-port"} {
+		if !strings.Contains(s, want) {
+			t.Errorf("в apply.sh нет %q", want)
+		}
+	}
+	// без портов — никаких обращений к firewall
+	if s := applyScript(nil, false, nil); strings.Contains(s, "ufw") {
+		t.Error("ufw вызывается без портов")
+	}
+}
+
 func TestApplyRestoresXrayConfigOnFailedRestart(t *testing.T) {
 	dir := t.TempDir()
 	write := func(name, content string, mode os.FileMode) {
@@ -179,7 +216,7 @@ func TestApplyRestoresXrayConfigOnFailedRestart(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	write("apply.sh", applyScript(nil, true), 0o700)
+	write("apply.sh", applyScript(nil, true, []string{"443/tcp"}), 0o700)
 	write("xray.json", "new", 0o600)
 	write("running.json", "old", 0o600)
 	write("systemctl", "#!/bin/sh\n[ \"$*\" = 'restart xray' ] && [ \"$(cat \"$XRAY_CONFIG\")\" = old ]\n", 0o700)

@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"revhub/internal/api"
+	"revhub/internal/apply"
 	"revhub/internal/auth"
 	"revhub/internal/certs"
 	"revhub/internal/gen"
@@ -48,6 +49,8 @@ func main() {
 		cmdServe(os.Args[2:])
 	case "render":
 		cmdRender(os.Args[2:])
+	case "apply-local":
+		cmdApplyLocal(os.Args[2:])
 	case "validate":
 		cmdValidate(os.Args[2:])
 	case "demo":
@@ -77,6 +80,7 @@ func usage() {
   revhub tls acme       --domain d --email e [--method http|dns] [--dns dns_cf]
   revhub passwd   [--state state.json] [--user admin] [--random --password-file f]
   revhub render   --node <id> [--state state.json] [--out out]
+  revhub apply-local [--node <id>] [--state state.json]
   revhub validate [--state state.json]
   revhub demo     [--state demo-state.json]
   revhub version
@@ -93,6 +97,7 @@ func cmdServe(args []string) {
 	tlsCert := fs.String("tls-cert", "", "сертификат для HTTPS панели")
 	tlsKey := fs.String("tls-key", "", "ключ для HTTPS панели")
 	localNode := fs.String("local-node", "node-1", "id узла, на котором работает панель")
+	applyMode := fs.String("apply", "auto", "применение конфига: auto | sudo | direct | off")
 	fs.Parse(args)
 
 	st, err := store.Open(*statePath)
@@ -105,6 +110,11 @@ func cmdServe(args []string) {
 	}
 	srv := &api.Server{Store: st, OutDir: *outDir, NoAuth: *noAuth, Secrets: sec, LocalNode: *localNode, TLSCert: *tlsCert, TLSKey: *tlsKey}
 	srv.Prov = &provision.Service{Store: st, Secrets: sec, OutDir: *outDir}
+	srv.Apply = &apply.Service{
+		Store: st, Secrets: sec, OutDir: *outDir, StatePath: *statePath,
+		LocalNode: *localNode, Method: *applyMode, Remote: srv.Prov,
+		Logf: func(s string) { log.Print(s) },
+	}
 	srv.Mon = &monitor.Monitor{Store: st}
 
 	if *noAuth {

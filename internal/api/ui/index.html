@@ -27,6 +27,9 @@
   .row{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:12px}
   .mut{color:var(--mut)}
   .pill{border:1px solid var(--bd);border-radius:999px;padding:1px 8px;color:var(--mut);white-space:nowrap}
+  .pill.ok{border-color:var(--acc);color:var(--acc)}
+  .pill.err{border-color:var(--err);color:var(--err);cursor:pointer}
+  .pill.run{border-color:var(--warn);color:var(--warn)}
   .card{border:1px solid var(--bd);border-radius:8px;margin-bottom:10px;background:var(--card)}
   .hd{display:flex;gap:10px;align-items:center;padding:9px 12px;cursor:pointer;user-select:none;border-radius:8px}
   .hd:hover{background:var(--card2)}
@@ -58,6 +61,7 @@
   <span class="pill">вход · выход · оба</span>
   <span class="sp"></span>
   <span id="who" class="mut"></span>
+  <span id="apply" class="pill" title="применение конфигурации на узлы" onclick="showApplyReport()"></span>
   <span id="status" class="mut"></span>
   <button class="b p" onclick="save()">Сохранить</button>
   <button class="b" onclick="logout()">выход</button>
@@ -68,7 +72,7 @@
 <script>
 const TABS = [
   ['nodes','Узлы'],['inbounds','Инбаунды'],['tunnels','Туннели'],
-  ['clients','Клиенты'],['routes','Маршруты'],['render','Рендер'],['check','Проверка маршрута']
+  ['clients','Клиенты'],['routes','Маршруты'],['check','Проверка маршрута']
 ];
 
 const SCHEMA = {
@@ -153,7 +157,7 @@ const GROUPS = {
            ['Куда и где',['node_id','outbound','enabled']]]
 };
 
-let ST = null, TAB = 'nodes', TOAST = '', TOASTERR = false;
+let ST = null, TAB = 'nodes', TOAST = '', TOASTERR = false, APPLY = null;
 let LOCAL_NODE = '', PANEL_TLS = false;
 const OPEN = new Set();   // ключи раскрытых карточек
 
@@ -181,14 +185,16 @@ async function boot(){
     document.getElementById('who').textContent = me.noauth ? 'без пароля (--noauth)' : (me.user||'');
   }catch(e){ return; }
   await load();
+  refreshApply();
 }
 async function load(){ ST = await api('/api/state'); render(); }
 async function save(){
   try{
     ST = await api('/api/state',{method:'PUT',headers:{'content-type':'application/json'},body:JSON.stringify(ST)});
-    toast('Сохранено. Для запуска изменений примени конфигурацию во вкладке «Рендер».');
+    toast('Сохранено, применяю на узлы…');
   }catch(e){ toast('Не сохранилось:\n'+e.message, true); }
   render();
+  waitApply();
 }
 async function logout(){
   try{ await api('/api/logout',{method:'POST'}); }catch(e){}
@@ -227,9 +233,116 @@ function render(){
   st.textContent = ST ? `${plural((ST.nodes||[]).length,'узел','узла','узлов')} · ${plural((ST.tunnels||[]).length,'туннель','туннеля','туннелей')} · ${plural((ST.clients||[]).length,'клиент','клиента','клиентов')} · ${plural((ST.routes||[]).length,'правило','правила','правил')}` : 'загрузка…';
   const v = document.getElementById('view');
   if(!ST){ v.textContent='загрузка…'; return; }
-  if(TAB==='render') return renderOut(v);
   if(TAB==='check') return renderCheck(v);
   renderList(v);
+}
+
+// ---------- применение: сохранение = конфиг уже на узлах
+
+function renderApplyBar(){
+  const el = document.getElementById('apply');
+  if(!el) return;
+  if(!APPLY){ el.textContent = ''; el.className = 'pill'; return; }
+  const bad = (APPLY.nodes||[]).filter(n=>!n.ok && !n.skipped);
+  if(APPLY.running){ el.textContent = '⟳ применяю…'; el.className = 'pill run'; }
+  else if(bad.length){ el.textContent = `✗ не применилось: ${bad.length} · подробности`; el.className = 'pill err'; }
+  else if((APPLY.nodes||[]).length){ el.textContent = '✓ применено'; el.className = 'pill ok'; }
+  else { el.textContent = ''; el.className = 'pill'; }
+}
+function applyText(){
+  if(!APPLY) return '';
+  const L = [];
+  if(APPLY.running) L.push('идёт применение…');
+  if(APPLY.finished_at) L.push('закончено: ' + APPLY.finished_at.replace('T',' ').slice(0,19) + 'Z');
+  for(const n of APPLY.nodes||[]){
+    const mark = n.skipped ? '·' : (n.ok ? '✓' : '✗');
+    L.push(`${mark} ${n.name || n.node_id}${n.local?' (эта машина)':''}${n.err?' — '+n.err:''}`);
+    if(n.output) L.push(indent(n.output));
+  }
+  for(const w of APPLY.warnings||[]) L.push('⚠ ' + w);
+  return L.join('\n');
+}
+function indent(t){
+  return String(t).split('\n').map(s=>'    '+s).join('\n');
+}
+function showApplyReport(){
+  const d = document.createElement('dialog');
+  d.innerHTML = `<form method="dialog"><div class="hint">Что сделала панель после сохранения: локальный узел применён через sudo, удалённые — по SSH.</div>
+    <pre style="max-height:52vh">${esc(applyText() || 'пока нечего показать')}</pre>
+    <div class="row"><button class="b p">Закрыть</button></div></form>`;
+  d.addEventListener('close',()=>d.remove(),{once:true});
+  document.body.appendChild(d);
+  d.showModal();
+}
+async function refreshApply(){
+  try{ APPLY = await api('/api/apply'); }catch(e){ return; }
+  renderApplyBar();
+}
+async function waitApply(){
+  for(let i=0;i<240;i++){
+    try{ APPLY = await api('/api/apply'); }catch(e){ return; }
+    renderApplyBar();
+    if(APPLY && !APPLY.running) break;
+    await new Promise(r=>setTimeout(r,700));
+  }
+  const bad = ((APPLY&&APPLY.nodes)||[]).filter(n=>!n.ok && !n.skipped);
+  if(bad.length){
+    toast('применено не всё:\n' + bad.map(n=>`${n.name||n.node_id}: ${n.err}`).join('\n'), true);
+  } else if(APPLY && !APPLY.running){
+    toast('применено ✓');
+  }
+  await load();
+}
+async function applyNode(i){
+  const n = ST.nodes[i];
+  toast('применяю конфиг на ' + (n.name||n.id) + '…');
+  try{
+    await api('/api/apply', {method:'POST', headers:{'content-type':'application/json'}, body:JSON.stringify({node:n.id})});
+    toast('применено на ' + (n.name||n.id));
+  }catch(e){ toast('не применилось:\n'+e.message, true); }
+  await load(); refreshApply();
+}
+async function diagNode(i){
+  const n = ST.nodes[i];
+  toast('проверяю ' + (n.name||n.id) + '…');
+  try{
+    const d = await api('/api/node/diag', {method:'POST', headers:{'content-type':'application/json'}, body:JSON.stringify({node:n.id})});
+    const dlg = document.createElement('dialog');
+    const lines = (d.items||[]).map(it=>{
+      const mark = it.ok ? (it.warn?'⚠':'✓') : '✗';
+      return `${mark} ${it.name}${it.out?': '+it.out:''}${it.hint?'\n     → '+it.hint:''}`;
+    });
+    dlg.innerHTML = `<form method="dialog"><div class="hint">Проверка узла «${esc(n.name||n.id)}»${d.local?' (эта машина)':' по SSH'}.</div>
+      <pre style="max-height:56vh">${esc(lines.join('\n') || 'нет данных')}</pre>
+      <div class="row"><button class="b p">Закрыть</button></div></form>`;
+    dlg.addEventListener('close',()=>dlg.remove(),{once:true});
+    document.body.appendChild(dlg); dlg.showModal();
+  }catch(e){ toast('проверка не удалась:\n'+e.message, true); }
+}
+function tunnelPing(i){
+  const t = ST.tunnels[i];
+  const dlg = document.createElement('dialog');
+  dlg.innerHTML = `<form method="dialog"><div class="hint">Туннель «${esc(t.name||t.id)}»: ${esc(t.from_node_id)} → ${esc(t.to_node_id)}.
+      Проверяются рукопожатие WireGuard, пинг дальнего конца по интерфейсу и пинг хоста через выходной узел.</div>
+    <div class="f"><label for="ph">Пинговать через туннель</label><input id="ph" value="1.1.1.1"></div>
+    <div class="row"><button class="b p" type="button" onclick="runTunnelPing('${esc(t.id)}')">Проверить</button>
+      <button class="b" type="button" onclick="this.closest('dialog').close()">Закрыть</button></div>
+    <pre id="po" style="max-height:50vh">—</pre></form>`;
+  dlg.addEventListener('close',()=>dlg.remove(),{once:true});
+  document.body.appendChild(dlg); dlg.showModal();
+}
+async function runTunnelPing(id){
+  const out = document.getElementById('po'), host = (document.getElementById('ph')||{}).value || '';
+  if(out) out.textContent = 'проверяю…';
+  try{
+    const r = await api('/api/tunnel/ping', {method:'POST', headers:{'content-type':'application/json'},
+      body:JSON.stringify({tunnel:id, host:host.trim()})});
+    const lines = (r.items||[]).map(it=>{
+      const mark = it.ok ? (it.warn?'⚠':'✓') : '✗';
+      return `${mark} ${it.name}${it.out?':\n'+indent(it.out):''}${it.hint?'\n     → '+it.hint:''}`;
+    });
+    if(out) out.textContent = lines.join('\n\n') || 'нет данных';
+  }catch(e){ if(out) out.textContent = 'ошибка: ' + e.message; }
 }
 
 function keyOf(r,i){ return r.id || ('i'+i); }
@@ -311,15 +424,15 @@ function actions(tab,i,r){
   const stop = 'event.stopPropagation();';
   let b = '';
   if(tab==='inbounds' && r.kind!=='wireguard' && r.security==='reality') b += `<button class="b" title="ключи reality" onclick="${stop}genReality(${i})">🔑</button>`;
-  if(tab==='tunnels') b += `<button class="b" title="ключи WireGuard" onclick="${stop}genWG(${i})">🔑</button>`;
+  if(tab==='tunnels') b += `<button class="b" title="ключи WireGuard" onclick="${stop}genWG(${i})">🔑</button>
+    <button class="b" title="проверить пинг по туннелю" onclick="${stop}tunnelPing(${i})">📶</button>`;
   if(tab==='clients') b += `<button class="b" title="UUID" onclick="${stop}genUUID(${i})">🆔</button>
     <button class="b" title="токен подписки" onclick="${stop}genToken(${i})">🎫</button>
     <button class="b" title="ссылки подписки" onclick="${stop}subLinks(${i})">sub</button>`;
   if(tab==='nodes'){
     b += `<button class="b" title="проверить сейчас" onclick="${stop}checkNodes()">🔍</button>`;
-    b += r.id===LOCAL_NODE
-      ? `<button class="b" title="конфигурация локального узла" onclick="${stop}TAB='render';render()">⚙</button>`
-      : `<button class="b" title="поставить/обновить на хосте" onclick="${stop}reinstallNode(${i})">⚙</button>`;
+    b += `<button class="b" title="применить конфиг на узле" onclick="${stop}applyNode(${i})">⚙</button>
+      <button class="b" title="диагностика узла" onclick="${stop}diagNode(${i})">🩺</button>`;
   }
   if(tab==='routes') b += `<button class="b" title="выше" onclick="${stop}moveRow(${i},-1)">↑</button>
     <button class="b" title="ниже" onclick="${stop}moveRow(${i},1)">↓</button>`;
@@ -567,7 +680,7 @@ async function provisionAdd(){
       report.style.display='block';
       report.textContent = (rep.steps||[]).join('\n') + '\n\n' + (rep.bootstrap||'');
     }
-    toast('Выходной узел добавлен. Примени конфигурацию хаба во вкладке «Рендер».');
+    await waitApply();
   }catch(e){
     log.textContent = 'ошибка: ' + e.message;
     toast('установка не удалась', true);
@@ -576,7 +689,7 @@ async function provisionAdd(){
 
 async function reinstallNode(i){
   const n = ST.nodes[i];
-  if(!confirm('Переустановить и применить конфиг на ' + (n.name||n.id) + ' по SSH?')) return;
+  if(!confirm('Полностью переустановить узел ' + (n.name||n.id) + ' по SSH (ядро, пакеты, конфиг)?')) return;
   toast('ставлю на ' + (n.ssh_addr||n.id) + '…');
   try{
     const rep = await api('/api/node/provision', {method:'POST', headers:{'content-type':'application/json'},
@@ -599,7 +712,7 @@ function hintFor(tab){
     inbounds:'Выбери сервер, на котором клиент подключится к инбаунду. Для маршрута через выходной туннель выбери хаб — начало этого туннеля.',
     tunnels:'wg — слушает to, звонит from. wg-reverse — наоборот (нужно, если to за NAT). Трафик всегда from → to.',
     clients:'UUID и sub_token создаются сами при сохранении, если пусты.',
-    routes:'Первое совпавшее правило выигрывает. Сохрани правила и примени конфигурацию узла во вкладке «Рендер».'
+    routes:'Первое совпавшее правило выигрывает. Сохранение сразу применяет правила на узлы.'
   }[tab]||'';
 }
 
@@ -629,32 +742,6 @@ async function subLinks(i){
     document.body.appendChild(dialog);
     dialog.showModal();
   }catch(e){ toast(e.message, true); }
-}
-
-function renderOut(v){
-  const nodes = ST.nodes||[];
-  v.innerHTML = `<div class="row">
-    <select id="rnode" style="width:auto;max-width:100%">${nodes.map(n=>`<option value="${esc(n.id)}" ${n.id===LOCAL_NODE?'selected':''}>${esc(n.name||n.id)}</option>`).join('')}</select>
-    <button class="b" onclick="preview()">Предпросмотр xray.json</button>
-    <button class="b p" onclick="renderFiles()">Сгенерировать артефакты</button>
-    <span class="mut">Конфигурацию WG-туннеля нужно применить на обоих серверах.</span>
-  </div><pre id="out">—</pre>`;
-}
-async function preview(){
-  const n = document.getElementById('rnode').value;
-  try{ document.getElementById('out').textContent = JSON.stringify(await api('/api/preview?node='+encodeURIComponent(n)), null, 2); }
-  catch(e){ toast(e.message,true); document.getElementById('out').textContent = 'ошибка: '+e.message; }
-}
-async function renderFiles(){
-  const n = document.getElementById('rnode').value;
-  try{
-    const j = await api('/api/render',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({node:n})});
-    const script = "'" + (j.dir+'/apply.sh').replaceAll("'", "'\\''") + "'";
-    const apply = j.local ? '\n\nНа сервере панели выполни:\nsudo bash ' + script : '\n\nДля удалённого узла используй ⚙ в его карточке.';
-    document.getElementById('out').textContent = j.dir + '\n\n' +
-      j.files.map(f=>`${f.name.padEnd(26)} ${String(f.size).padStart(6)} B  ${f.sha.slice(0,12)}`).join('\n') + apply;
-    toast('отрендерено: '+j.dir);
-  }catch(e){ toast(e.message,true); }
 }
 
 function renderCheck(v){

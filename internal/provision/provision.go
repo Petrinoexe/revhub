@@ -313,7 +313,7 @@ func (s *Service) Run(req Request) (*Report, error) {
 	_ = os.WriteFile(filepath.Join(dir, "manifest.json"), man.JSON(), 0o640)
 	rep.Steps = append(rep.Steps, "артефакты хаба обновлены: "+dir)
 	if !req.ApplyLocal {
-		rep.Steps = append(rep.Steps, "хаб ожидает применения: открой «Рендер», сгенерируй артефакты хаба и выполни показанную команду")
+		rep.Steps = append(rep.Steps, "хаб применит конфиг сам сразу после сохранения в панели")
 	}
 
 	if req.ApplyLocal {
@@ -380,6 +380,22 @@ func (s *Service) reinstall(req Request) (*Report, error) {
 	})
 	rep.Steps = append(rep.Steps, "узел переустановлен: "+res.XrayState)
 	return rep, nil
+}
+
+// Deploy — то, что вызывает авто-применение после сохранения: положить свежие
+// артефакты узла по SSH и применить их. Возвращает текст для журнала панели.
+func (s *Service) Deploy(nodeID string) (string, error) {
+	rep, err := s.reinstall(Request{NodeID: nodeID})
+	if rep == nil {
+		return "", err
+	}
+	var b strings.Builder
+	for _, line := range rep.Steps {
+		b.WriteString(line)
+		b.WriteString("\n")
+	}
+	b.WriteString(rep.Bootstrap)
+	return strings.TrimSpace(b.String()), err
 }
 
 func (s *Service) opener() bootstrap.Open {
