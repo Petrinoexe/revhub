@@ -49,9 +49,10 @@
   pre{background:#0a0d12;border:1px solid var(--bd);border-radius:6px;padding:12px;overflow:auto;max-height:62vh;white-space:pre}
   .toast{position:fixed;right:16px;bottom:16px;max-width:46vw;background:var(--card);border:1px solid var(--bd);border-left:3px solid var(--acc2);padding:10px 14px;border-radius:6px;white-space:pre-wrap;z-index:9}
   .toast.err{border-left-color:var(--err)}
-  dialog{background:var(--card);color:inherit;border:1px solid var(--bd);border-radius:8px;width:min(640px,calc(100vw - 32px));box-sizing:border-box}
+  dialog{background:var(--card);color:inherit;border:1px solid var(--bd);border-radius:8px;width:min(640px,calc(100vw - 32px));max-height:calc(100vh - 32px);overflow:auto;box-sizing:border-box}
   dialog::backdrop{background:#0008}
   dialog textarea{min-height:110px}
+  dialog pre{max-height:38vh}
   .hint{color:var(--mut);font-size:12px;margin:2px 0 14px}
 </style>
 </head>
@@ -428,7 +429,8 @@ function actions(tab,i,r){
     <button class="b" title="проверить пинг по туннелю" onclick="${stop}tunnelPing(${i})">📶</button>`;
   if(tab==='clients') b += `<button class="b" title="UUID" onclick="${stop}genUUID(${i})">🆔</button>
     <button class="b" title="токен подписки" onclick="${stop}genToken(${i})">🎫</button>
-    <button class="b" title="ссылки подписки" onclick="${stop}subLinks(${i})">sub</button>`;
+    <button class="b" title="ссылки подписки" onclick="${stop}subLinks(${i})">sub</button>
+    <button class="b" title="скачать WireGuard-конфиг (.conf)" onclick="${stop}wgConfig(${i})">wg</button>`;
   if(tab==='nodes'){
     b += `<button class="b" title="проверить сейчас" onclick="${stop}checkNodes()">🔍</button>`;
     b += `<button class="b" title="применить конфиг на узле" onclick="${stop}applyNode(${i})">⚙</button>
@@ -461,6 +463,7 @@ function bodyOf(tab,i,r){
     const wg = r.wireguard || {};
     html += `<div class="grp">WireGuard</div><div class="grid">
       <div class="f"><label>Подсеть клиентов</label><input value="${esc(wg.subnet || '10.88.0.0/24')}" onchange="setWGSubnet(${i},this.value.trim())"></div>
+      <div class="f"><label>DNS клиентам (IP через запятую)</label><input value="${esc(wg.dns || '1.1.1.1, 1.0.0.1')}" onchange="setWGDNS(${i},this.value.trim())"></div>
       <div class="f wide"><label>Публичный ключ сервера</label><input readonly value="${esc(wg.public_key)}" placeholder="Генерируется при сохранении"></div>
     </div>`;
   }
@@ -471,7 +474,7 @@ function bodyOf(tab,i,r){
       return inbound?.kind==='wireguard' && peer ? `${inbound.tag}: ${peer.address}` : '';
     }).filter(Boolean);
     if(addresses.length) html += `<div class="hint">WireGuard: ${esc(addresses.join(' · '))}</div>`;
-    html += `<div class="hint">UUID, токен подписки и ключи выбранных WireGuard-инбаундов заполняются при сохранении. Кнопка «sub» открывает ссылки.</div>`;
+    html += `<div class="hint">UUID, токен подписки и ключи выбранных WireGuard-инбаундов заполняются при сохранении. Кнопка «sub» открывает ссылки, «wg» скачивает конфиг wg-quick (.conf).</div>`;
   }
   return html;
 }
@@ -545,6 +548,10 @@ function refreshHeader(){
 function setWGSubnet(i,subnet){
   const inbound = ST.inbounds[i];
   inbound.wireguard = {...inbound.wireguard, subnet};
+}
+function setWGDNS(i,dns){
+  const inbound = ST.inbounds[i];
+  inbound.wireguard = {...inbound.wireguard, dns};
 }
 function nextWGPort(inbound){
   const ports = new Set((ST.inbounds||[]).filter(x=>x!==inbound && x.enabled && x.kind==='wireguard' && x.node_id===inbound.node_id).map(x=>x.port));
@@ -744,6 +751,38 @@ async function subLinks(i){
   }catch(e){ toast(e.message, true); }
 }
 
+function wgURL(i,inbound){
+  return '/api/wg-conf/'+encodeURIComponent(inbound)+'?client='+encodeURIComponent(ST.clients[i].id);
+}
+function download(url){
+  const a = document.createElement('a');
+  a.href = url; a.download = ''; a.rel = 'noopener';
+  document.body.appendChild(a); a.click(); a.remove();
+}
+async function wgConfig(i){
+  try{
+    const j = await api('/api/wg-conf?client='+encodeURIComponent(ST.clients[i].id));
+    const confs = j.configs || [];
+    if(!confs.length){
+      toast('Нечего скачивать: клиент выключен или истёк, либо у него нет включённого WireGuard-инбаунда с адресом узла.', true);
+      return;
+    }
+    if(confs.length===1){ download(wgURL(i, confs[0].inbound)); return; }
+    const dialog = document.createElement('dialog');
+    dialog.innerHTML = `<form method="dialog">
+      <div class="hint">Приватные ключи клиента: по конфигу на каждый WireGuard-инбаунд. Файл кладётся в /etc/wireguard и поднимается через wg-quick up.</div>
+      <div class="f"><label for="wg-pick">Инбаунд</label><select id="wg-pick">${confs.map(c=>`<option value="${esc(c.inbound)}">${esc(c.tag||c.inbound)} — ${esc(c.file)}</option>`).join('')}</select></div>
+      <div class="f"><label>Содержимое файла</label><pre id="wg-text"></pre></div>
+      <div class="row"><button class="b p" type="button" onclick="download(wgURL(${i}, document.getElementById('wg-pick').value))">⤓ Скачать</button>
+        <button class="b">Закрыть</button></div></form>`;
+    const pick = dialog.querySelector('#wg-pick'), view = dialog.querySelector('#wg-text');
+    const show = ()=>{ const c = confs.find(x=>x.inbound===pick.value) || confs[0]; view.textContent = c ? c.text : ''; };
+    pick.addEventListener('change', show); show();
+    dialog.addEventListener('close',()=>dialog.remove(),{once:true});
+    document.body.appendChild(dialog);
+    dialog.showModal();
+  }catch(e){ toast(e.message, true); }
+}
 function renderCheck(v){
   const nodes = ST.nodes||[];
   v.innerHTML = `<div class="hint">Dry-run: первый матч по правилам узла. geoip/geosite локально не раскрываются, поэтому выводятся отдельным списком «могут перехватить».</div>

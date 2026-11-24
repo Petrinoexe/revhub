@@ -63,6 +63,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/render", s.render)
 	mux.HandleFunc("GET /api/route-check", s.routeCheck)
 	mux.HandleFunc("GET /api/sub-link", s.subLink)
+	mux.HandleFunc("GET /api/wg-conf", s.wgConfigs)
+	mux.HandleFunc("GET /api/wg-conf/{inbound}", s.wgConfigFile)
 	mux.HandleFunc("POST /api/node/secret", s.setSecret)
 	mux.HandleFunc("POST /api/node/provision", s.provisionNode)
 	mux.HandleFunc("POST /api/node/check", s.checkNodes)
@@ -410,22 +412,67 @@ func (s *Server) routeCheck(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) subLink(w http.ResponseWriter, r *http.Request) {
 	st := s.Store.Snapshot()
-	id := r.URL.Query().Get("client")
-	for _, c := range st.Clients {
-		if c.ID != id {
-			continue
-		}
-		links := sub.Links(st, c)
-		w.Header().Set("Cache-Control", "no-store")
-		writeJSON(w, http.StatusOK, map[string]any{
-			"url":   "/sub/" + c.SubToken,
-			"count": len(links),
-			"links": links,
-			"b64":   sub.Payload(links),
-		})
+	c, ok := clientByID(st, r.URL.Query().Get("client"))
+	if !ok {
+		writeErr(w, http.StatusNotFound, "клиент не найден")
 		return
 	}
-	writeErr(w, http.StatusNotFound, "клиент не найден")
+	links := sub.Links(st, c)
+	w.Header().Set("Cache-Control", "no-store")
+	writeJSON(w, http.StatusOK, map[string]any{
+		"url":   "/sub/" + c.SubToken,
+		"count": len(links),
+		"links": links,
+		"b64":   sub.Payload(links),
+	})
+}
+
+// wgConfigs — список клиентских WireGuard-конфигов для UI: имя файла и текст.
+// Текст отдаётся здесь же, чтобы диалог показал, что именно скачается.
+func (s *Server) wgConfigs(w http.ResponseWriter, r *http.Request) {
+	st := s.Store.Snapshot()
+	c, ok := clientByID(st, r.URL.Query().Get("client"))
+	if !ok {
+		writeErr(w, http.StatusNotFound, "клиент не найден")
+		return
+	}
+	confs := sub.WireGuardConfigs(st, c)
+	w.Header().Set("Cache-Control", "no-store")
+	writeJSON(w, http.StatusOK, map[string]any{"count": len(confs), "configs": confs})
+}
+
+// wgConfigFile отдаёт один конфиг файлом <email>-<tag>.conf: в нём приватный
+// ключ клиента, поэтому no-store и attachment, а не текст в браузере.
+func (s *Server) wgConfigFile(w http.ResponseWriter, r *http.Request) {
+	st := s.Store.Snapshot()
+	c, ok := clientByID(st, r.URL.Query().Get("client"))
+	if !ok {
+		writeErr(w, http.StatusNotFound, "клиент не найден")
+		return
+	}
+	want := r.PathValue("inbound")
+	for _, conf := range sub.WireGuardConfigs(st, c) {
+		if conf.Inbound != want {
+			continue
+		}
+		w.Header().Set("Cache-Control", "no-store")
+		w.Header().Set("Content-Type", "application/octet-stream")
+		w.Header().Set("Content-Disposition", "attachment; filename=\""+conf.File+"\"")
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		_, _ = w.Write([]byte(conf.Text))
+		return
+	}
+	writeErr(w, http.StatusNotFound, "у клиента нет WireGuard-конфига для этого инбаунда")
+}
+
+// clientByID ищет клиента в снимке состояния.
+func clientByID(st model.State, id string) (model.Client, bool) {
+	for _, c := range st.Clients {
+		if c.ID == id {
+			return c, true
+		}
+	}
+	return model.Client{}, false
 }
 
 func (s *Server) subscription(w http.ResponseWriter, r *http.Request) {
@@ -590,6 +637,9 @@ func logRequests(next http.Handler) http.Handler {
 		path := r.URL.Path
 		if strings.HasPrefix(path, "/sub/") {
 			path = "/sub/{token}"
+		}
+		if strings.HasPrefix(path, "/api/wg-conf/") {
+			path = "/api/wg-conf/{inbound}"
 		}
 		fmt.Printf("%s %s\n", r.Method, path)
 		next.ServeHTTP(w, r)

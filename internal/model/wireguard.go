@@ -6,15 +6,21 @@ import (
 	"encoding/base64"
 	"net/netip"
 	"slices"
+	"strings"
 )
 
 const (
 	DefaultWireGuardSubnet = "10.88.0.0/24"
 	DefaultWireGuardMTU    = 1420
+	// DNS отдаётся клиенту в его wg-quick конфиге: без него полный туннель
+	// уводит весь трафик, а резолвинг остаётся у провайдера (утечка + часть
+	// сайтов недоступна по геолокации).
+	DefaultWireGuardDNS = "1.1.1.1, 1.0.0.1"
 )
 
 type WireGuardInbound struct {
 	Subnet     string `json:"subnet"`
+	DNS        string `json:"dns"` // список IP через запятую для клиентских конфигов
 	PrivateKey string `json:"private_key"`
 	PublicKey  string `json:"public_key"`
 }
@@ -39,6 +45,9 @@ func (in *Inbound) normalizeWireGuard() {
 	wg := in.WireGuard
 	if wg.Subnet == "" {
 		wg.Subnet = DefaultWireGuardSubnet
+	}
+	if wg.DNS == "" {
+		wg.DNS = DefaultWireGuardDNS
 	}
 	fillWGKeys(&wg.PrivateKey, &wg.PublicKey)
 }
@@ -154,6 +163,16 @@ func (s State) validateWireGuard(in Inbound, add func(string, ...any)) {
 	p, ok := wireGuardSubnet(wg.Subnet)
 	if !ok {
 		add("инбаунд %s: нужна IPv4-подсеть WireGuard от /8 до /30", in.Tag)
+	}
+	if wg.DNS != "" {
+		for _, part := range strings.Split(wg.DNS, ",") {
+			// Клиентский конфиг уходит как есть: опечатка в DNS оставит
+			// клиента без резолвера при живом туннеле.
+			if _, err := netip.ParseAddr(strings.TrimSpace(part)); err != nil {
+				add("инбаунд %s: DNS клиентов — IP-адреса через запятую", in.Tag)
+				break
+			}
+		}
 	}
 	if pub := wgPublicKey(wg.PrivateKey); pub == "" || pub != wg.PublicKey {
 		add("инбаунд %s: неверная пара ключей WireGuard", in.Tag)

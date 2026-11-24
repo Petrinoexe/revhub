@@ -30,6 +30,9 @@
 | `cert_source` | `acme` (домен) \| `acmeip` (IP через Let's Encrypt) \| `selfsigned` (IP без CA) \| `file` (готовые файлы) |
 | `domain`, `ip` | два разных поля: домен для acme/SNI, IP — для самоподписанного |
 | `cert_file`, `key_file` | итоговые пути на узле (`/etc/revhub/tls/...`) |
+| `wireguard.subnet` | подсеть клиентов (`10.88.0.0/24` по умолчанию), `.1` — сам Xray |
+| `wireguard.dns` | DNS для клиентских `.conf` (IP через запятую, по умолчанию `1.1.1.1, 1.0.0.1`) |
+| `wireguard.private_key`, `public_key` | ключи сервера WireGuard (генерирует панель) |
 
 ## Tunnel — транспорт до другого узла
 
@@ -54,6 +57,7 @@
 | `enabled` | выключенный не попадает ни в конфиг, ни в подписку |
 | `expires_at`, `quota_gb` | срок и квота; `0`/пусто = без ограничения |
 | `inbounds` | список inbound-id, к которым привязан (аналог client_inbounds) |
+| `wireguard` | карта `inbound-id → {address, private_key, public_key, preshared_key}`; заполняется при сохранении, уходит в подписку и в клиентский `.conf` |
 | `sub_token` | секрет URL подписки |
 
 ## Rule — правило маршрутизации

@@ -37,10 +37,9 @@ func Links(st model.State, c model.Client) []string {
 			}
 			out = append(out, vlessLink(in, node, host, port, c, st))
 		case model.InboundWireGuard:
-			// Порт узла может быть портом панели или TCP-инбаунда.
 			peer, ok := c.WireGuard[in.ID]
 			if ok && in.WireGuard != nil && node.PublicAddr != "" {
-				out = append(out, wireGuardLink(in, host, c, peer))
+				out = append(out, wireGuardLink(in, wgEndpoint(in, node), c, peer))
 			}
 		}
 	}
@@ -53,17 +52,25 @@ func Payload(links []string) string {
 }
 
 // wireguard:// соответствует формату импорта v2rayN.
-func wireGuardLink(in model.Inbound, host string, c model.Client, peer model.WireGuardPeer) string {
+func wireGuardLink(in model.Inbound, endpoint string, c model.Client, peer model.WireGuardPeer) string {
 	q := url.Values{
 		"publickey": {in.WireGuard.PublicKey}, "presharedkey": {peer.PresharedKey},
 		"address": {peer.Address}, "mtu": {strconv.Itoa(model.DefaultWireGuardMTU)},
 	}
 	u := url.URL{
-		Host: net.JoinHostPort(host, strconv.Itoa(in.Port)), RawQuery: q.Encode(),
+		Host: endpoint, RawQuery: q.Encode(),
 		Fragment: c.Email + "@" + in.Tag,
 	}
 	// v2rayN декодирует userinfo как query, поэтому '+' в base64 экранируем явно.
 	return "wireguard://" + url.QueryEscape(peer.PrivateKey) + "@" + strings.TrimPrefix(u.String(), "//")
+}
+
+// wgEndpoint — host:port, который клиент дозванивает для WireGuard-инбаунда.
+// Порт берётся у инбаунда: в public_addr обычно порт панели или TCP-инбаунда,
+// поэтому из него нужен только хост.
+func wgEndpoint(in model.Inbound, node model.Node) string {
+	host, _ := hostPort(node.PublicAddr, in.Port)
+	return net.JoinHostPort(host, strconv.Itoa(in.Port))
 }
 
 func vlessLink(in model.Inbound, node model.Node, host string, port int, c model.Client, st model.State) string {

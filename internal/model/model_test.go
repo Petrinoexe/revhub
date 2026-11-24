@@ -88,3 +88,28 @@ func TestValidateRequiresIPForLECertificate(t *testing.T) {
 		t.Errorf("с заполненным ip состояние должно быть валидным: %v", err)
 	}
 }
+
+func TestValidateWireGuardDNS(t *testing.T) {
+	st := Demo()
+	st.Inbounds = append(st.Inbounds, Inbound{
+		ID: "in-wg", NodeID: "hub", Tag: "wg", Kind: InboundWireGuard,
+		Listen: "0.0.0.0", Port: 51830, Enabled: true,
+	})
+	st.Clients[0].Inbounds = append(st.Clients[0].Inbounds, "in-wg")
+	st.Normalize()
+	if err := st.Validate(); err != nil {
+		t.Fatalf("инбаунд WireGuard должен быть валиден: %v", err)
+	}
+	wg := st.Inbounds[1].WireGuard
+	if wg.DNS != DefaultWireGuardDNS {
+		t.Errorf("DNS по умолчанию = %q, ожидалось %q", wg.DNS, DefaultWireGuardDNS)
+	}
+	wg.DNS = "1.1.1.1, dns.example.com"
+	if err := st.Validate(); err == nil || !strings.Contains(err.Error(), "DNS") {
+		t.Errorf("ожидалась ошибка про DNS, получено %v", err)
+	}
+	wg.DNS = "8.8.8.8, 8.8.4.4"
+	if err := st.Validate(); err != nil {
+		t.Errorf("список IP должен приниматься: %v", err)
+	}
+}
