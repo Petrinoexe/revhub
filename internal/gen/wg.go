@@ -1,12 +1,14 @@
 package gen
 
 import (
+	"crypto/ecdh"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"sort"
@@ -47,7 +49,31 @@ func Artifacts(st model.State, nodeID string) ([]File, error) {
 		{Name: "xray.json", Content: string(xj), Mode: 0o640},
 	}
 
+	// Зона DNS клиентской сети: dnsmasq читает эти два файла, панель их только
+	// рендерит — резолвер остаётся системным сервисом, а не частью панели.
+	dnsFiles, dnsOn, err := DNSMasq(st, nodeID)
+	if err != nil {
+		return nil, err
+	}
+	if dnsOn {
+		files = append(files,
+			File{Name: DNSMasqConfName, Content: dnsFiles.Conf, Mode: 0o644},
+			File{Name: DNSHostsFileName, Content: dnsFiles.Hosts, Mode: 0o644})
+	}
+
 	var wgNames []string
+	for _, in := range st.Inbounds {
+		if !in.Enabled || in.NodeID != nodeID || in.Kind != model.InboundWireGuard {
+			continue
+		}
+		conf, err := ClientWGConf(st, in, nodeID)
+		if err != nil {
+			return nil, fmt.Errorf("инбаунд %s: %w", in.Tag, err)
+		}
+		name := in.WGInterface() + ".conf"
+		files = append(files, File{Name: name, Content: conf, Mode: 0o600})
+		wgNames = append(wgNames, name)
+	}
 	for _, t := range st.Tunnels {
 		if !t.Enabled || !t.Touches(nodeID) {
 			continue
@@ -105,7 +131,7 @@ func Artifacts(st model.State, nodeID string) ([]File, error) {
 		kickFiles(kicks)...,
 	)
 	files = append(files,
-		File{Name: "apply.sh", Content: applyScript(wgNames, useXray, NodePorts(st, nodeID), forward, kicks), Mode: 0o700},
+		File{Name: "apply.sh", Content: applyScript(wgNames, useXray, NodePorts(st, nodeID), forward, kicks, dnsOn), Mode: 0o700},
 		File{Name: "rollback.sh", Content: rollbackScript(wgNames, useXray, kicks), Mode: 0o700},
 	)
 	return files, nil
@@ -159,7 +185,8 @@ func NodePorts(st model.State, nodeID string) []string {
 // NeedsXray identifies nodes with listeners or an Xray tunnel endpoint.
 func NeedsXray(st model.State, nodeID string) bool {
 	for _, in := range st.Inbounds {
-		if in.Enabled && in.NodeID == nodeID {
+		// Клиентский WireGuard — ядерный интерфейс: xray на таком узле не нужен.
+		if in.Enabled && in.NodeID == nodeID && in.Kind != model.InboundWireGuard {
 			return true
 		}
 	}
@@ -169,6 +196,158 @@ func NeedsXray(st model.State, nodeID string) bool {
 		}
 	}
 	return false
+}
+
+// ClientWGConf рендерит wg-quick конфиг клиентской сети для узла: один
+// ядерный интерфейс на инбаунд, все клиенты в одной подсети. Пир видит пира
+// (маршрут /32 в тот же интерфейс), наружу трафик уходит NAT'ом самого узла
+// либо в туннель, если инбаунд так настроен.
+func ClientWGConf(st model.State, in model.Inbound, nodeID string) (string, error) {
+	if in.NodeID != nodeID {
+		return "", fmt.Errorf("инбаунд %q не на узле %s", in.Tag, nodeID)
+	}
+	wg := in.WireGuard
+	if wg == nil || wg.PrivateKey == "" || wg.PublicKey == "" {
+		return "", fmt.Errorf("нет ключей WireGuard")
+	}
+	if pub := wgPublicKeyOf(wg.PrivateKey); pub == "" || pub != wg.PublicKey {
+		return "", fmt.Errorf("неверная пара ключей WireGuard")
+	}
+	addr := wg.ServerAddressPrefix()
+	if addr == "" {
+		return "", fmt.Errorf("некорректная подсеть %q", wg.Subnet)
+	}
+	if in.Port <= 0 || in.Port > 65535 {
+		return "", fmt.Errorf("некорректный порт %d", in.Port)
+	}
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "# revhub: клиенты WireGuard — инбаунд %q на узле %s\n", in.Tag, nodeID)
+	fmt.Fprintf(&b, "# сеть %s: клиенты видят друг друга, выход — %s\n", addr, egressText(st, in))
+	b.WriteString("[Interface]\n")
+	fmt.Fprintf(&b, "Address = %s\n", addr)
+	fmt.Fprintf(&b, "PrivateKey = %s\n", wg.PrivateKey)
+	fmt.Fprintf(&b, "ListenPort = %d\n", in.Port)
+	fmt.Fprintf(&b, "MTU = %d\n", model.DefaultWireGuardMTU)
+
+	// Трафик пир→пир идёт через этот же интерфейс, значит это форвардинг:
+	// без ip_forward и разрешения в forward-цепочке он молча умирает.
+	b.WriteString("PostUp = sysctl -q -w net.ipv4.ip_forward=1\n")
+	b.WriteString("PostUp = printf '2\\n' > /proc/sys/net/ipv4/conf/%i/rp_filter\n")
+
+	// Разрешение в FORWARD — именно в общей цепочке filter/FORWARD, а не в
+	// своей nft-таблице: ufw и docker держат там же свои правила и дропают
+	// раньше; приватная base-цепочка чужой drop не отменяет. iptables на
+	// современных системах — это тот же nftables, поэтому правило одно.
+	b.WriteString("PostUp = iptables -I FORWARD -i %i -j ACCEPT\n")
+	b.WriteString("PostUp = iptables -I FORWARD -o %i -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT\n")
+	b.WriteString("PostDown = iptables -D FORWARD -i %i -j ACCEPT 2>/dev/null || true\n")
+	b.WriteString("PostDown = iptables -D FORWARD -o %i -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true\n")
+
+	// NAT — в своей таблице: там нет чужих правил, и удаление нашего drop-in'а
+	// не задевает остальное.
+	table := nftTable(in.WGInterface())
+	switch {
+	case strings.HasPrefix(in.Egress, model.TagTunnel):
+		// Клиенты выходят через туннель: маршрут по источнику в его таблицу.
+		name := strings.TrimPrefix(in.Egress, model.TagTunnel)
+		t, ok := findTunnel(st, name)
+		if !ok || t.FromNode != nodeID {
+			return "", fmt.Errorf("нет включённого туннеля %s на узле %s", name, nodeID)
+		}
+		fmt.Fprintf(&b, "PostUp = ip rule add from %s lookup %d pref 32000\n", wg.Subnet, t.Mark)
+		fmt.Fprintf(&b, "PostDown = ip rule del from %s lookup %d pref 32000 2>/dev/null || true\n", wg.Subnet, t.Mark)
+	default:
+		// Общий выход в интернет: NAT наружу, но не между пирами.
+		nat := []string{
+			fmt.Sprintf(`add table ip %s`, table),
+			fmt.Sprintf(`add chain ip %s postrouting { type nat hook postrouting priority 100; }`, table),
+			fmt.Sprintf(`add rule ip %s postrouting iifname "%%i" oifname != "%%i" masquerade`, table),
+		}
+		b.WriteString("PostUp = if command -v nft >/dev/null; then printf '%s\\n' " + shellJoin(nat) + " | nft -f -; else iptables -t nat -I POSTROUTING -s " + wg.Subnet + " ! -o %i -j MASQUERADE; fi\n")
+		b.WriteString("PostDown = if command -v nft >/dev/null; then nft delete table ip " + table + " 2>/dev/null || true; else iptables -t nat -D POSTROUTING -s " + wg.Subnet + " ! -o %i -j MASQUERADE 2>/dev/null || true; fi\n")
+	}
+
+	peers := 0
+	for _, c := range st.Clients {
+		if !c.Enabled || c.Expired() || !contains(c.Inbounds, in.ID) {
+			continue
+		}
+		peer, ok := c.WireGuard[in.ID]
+		if !ok {
+			return "", fmt.Errorf("у клиента %s нет ключей WireGuard", c.Email)
+		}
+		for _, key := range []string{peer.PublicKey, peer.PresharedKey} {
+			if raw, err := base64.StdEncoding.DecodeString(key); err != nil || len(raw) != 32 {
+				return "", fmt.Errorf("у клиента %s некорректный ключ WireGuard", c.Email)
+			}
+		}
+		if _, ok := modelPeerPrefix(peer.Address); !ok {
+			return "", fmt.Errorf("у клиента %s некорректный адрес WireGuard", c.Email)
+		}
+		b.WriteString("\n[Peer]\n")
+		fmt.Fprintf(&b, "# %s\n", c.Email)
+		fmt.Fprintf(&b, "PublicKey = %s\n", peer.PublicKey)
+		fmt.Fprintf(&b, "PresharedKey = %s\n", peer.PresharedKey)
+		fmt.Fprintf(&b, "AllowedIPs = %s\n", peer.Address)
+		peers++
+	}
+	if peers == 0 {
+		return "", fmt.Errorf("нет ни одного активного клиента WireGuard")
+	}
+	return b.String(), nil
+}
+
+// egressText — человекочитаемое «куда выпускает» для шапки конфига.
+func egressText(st model.State, in model.Inbound) string {
+	if name, ok := strings.CutPrefix(in.Egress, model.TagTunnel); ok {
+		return "в туннель " + name
+	}
+	return "NAT этого узла"
+}
+
+func wgPublicKeyOf(private string) string {
+	raw, err := base64.StdEncoding.DecodeString(private)
+	if err != nil || len(raw) != 32 {
+		return ""
+	}
+	key, err := ecdh.X25519().NewPrivateKey(raw)
+	if err != nil {
+		return ""
+	}
+	return base64.StdEncoding.EncodeToString(key.PublicKey().Bytes())
+}
+
+func modelPeerPrefix(address string) (netip.Prefix, bool) {
+	p, err := netip.ParsePrefix(address)
+	if err != nil || p.Bits() != 32 {
+		return netip.Prefix{}, false
+	}
+	return p, true
+}
+
+// nftTable — имя nft-таблицы для интерфейса: короткое и без спецсимволов.
+func nftTable(iface string) string {
+	sum := sha256.Sum256([]byte(iface))
+	return fmt.Sprintf("revhub_%x", sum[:6])
+}
+
+// shellJoin собирает строки для `printf '%s\n' ...` в конфиге wg-quick.
+func shellJoin(items []string) string {
+	quoted := make([]string, len(items))
+	for i, s := range items {
+		quoted[i] = "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+	}
+	return strings.Join(quoted, " ")
+}
+
+func findTunnel(st model.State, name string) (model.Tunnel, bool) {
+	for _, t := range st.Tunnels {
+		if t.Name == name && t.Enabled {
+			return t, true
+		}
+	}
+	return model.Tunnel{}, false
 }
 
 // WGConfig рендерит wg-quick конфиг для одного конца туннеля.
@@ -387,7 +566,7 @@ WantedBy=timers.target
 	return out
 }
 
-func applyScript(wgFiles []string, useXray bool, ports []string, forward bool, kicks []kick) string {
+func applyScript(wgFiles []string, useXray bool, ports []string, forward bool, kicks []kick, dnsOn bool) string {
 	var b strings.Builder
 	b.WriteString("#!/usr/bin/env bash\n")
 	b.WriteString("# Сгенерировано revhub. Порядок важен: сначала туннели, потом ядро.\n")
@@ -476,6 +655,38 @@ done
 		b.WriteString(`install -d -m 755 /etc/sysctl.d
 printf '%s\n' 'net.ipv4.ip_forward=1' > /etc/sysctl.d/90-revhub.conf
 sysctl -q -p /etc/sysctl.d/90-revhub.conf 2>/dev/null || sysctl -q -w net.ipv4.ip_forward=1
+`)
+	}
+	if dnsOn {
+		b.WriteString(`
+install -d -m 755 /etc/dnsmasq.d /etc/revhub
+dns_changed=0
+cmp -s dnsmasq-revhub.conf /etc/dnsmasq.d/revhub.conf || dns_changed=1
+install -m 644 dnsmasq-revhub.conf /etc/dnsmasq.d/revhub.conf
+install -m 644 dns-hosts /etc/revhub/dns-hosts
+if ! command -v dnsmasq >/dev/null 2>&1; then
+  echo "[revhub] dnsmasq не установлен: зона DNS не поднята (apt install dnsmasq)" >&2
+elif [ "$dns_changed" = 1 ]; then
+  # Адреса, зона и порт читаются только при старте: SIGHUP перечитывает hosts.
+  systemctl enable dnsmasq >/dev/null 2>&1 || true
+  systemctl restart dnsmasq || echo "[revhub] dnsmasq не перезапустился, смотри journalctl -u dnsmasq" >&2
+else
+  systemctl reload dnsmasq >/dev/null 2>&1 || systemctl restart dnsmasq >/dev/null 2>&1 || true
+fi
+`)
+	} else {
+		// DNS выключили или перенесли на другой узел — убираем за собой.
+		b.WriteString(`
+if [ -f /etc/dnsmasq.d/revhub.conf ]; then
+  rm -f /etc/dnsmasq.d/revhub.conf /etc/revhub/dns-hosts
+  # try-restart трогает сервис, только если он запущен: на узле без DNS он не нужен
+  systemctl reload dnsmasq >/dev/null 2>&1 || systemctl try-restart dnsmasq >/dev/null 2>&1 || true
+  # Свой конфиг убрали; если чужих в /etc/dnsmasq.d нет, глушим сервис —
+  # иначе dnsmasq продолжит слушать 0.0.0.0:53 без нашей зоны.
+  if ! ls /etc/dnsmasq.d/*.conf >/dev/null 2>&1 && ! grep -qE '^[[:space:]]*[^#]' /etc/dnsmasq.conf 2>/dev/null; then
+    systemctl disable --now dnsmasq >/dev/null 2>&1 || true
+  fi
+fi
 `)
 	}
 	if !useXray {

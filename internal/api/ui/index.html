@@ -54,6 +54,9 @@
   dialog textarea{min-height:110px}
   dialog pre{max-height:38vh}
   .hint{color:var(--mut);font-size:12px;margin:2px 0 14px}
+  .tbl{width:100%;border-collapse:collapse;font-size:12px;margin-bottom:10px}
+  .tbl th{text-align:left;color:var(--mut);font-weight:600;border-bottom:1px solid var(--bd);padding:4px 6px}
+  .tbl td{border-bottom:1px solid var(--bd);padding:4px 6px;white-space:nowrap}
 </style>
 </head>
 <body>
@@ -73,7 +76,8 @@
 <script>
 const TABS = [
   ['nodes','Узлы'],['inbounds','Инбаунды'],['tunnels','Туннели'],
-  ['clients','Клиенты'],['routes','Маршруты'],['check','Проверка маршрута']
+  ['clients','Клиенты'],['routes','Маршруты'],['dns','DNS'],
+  ['panel','Панель'],['check','Проверка маршрута']
 ];
 
 const SCHEMA = {
@@ -124,6 +128,7 @@ const SCHEMA = {
     {k:'id', l:'id'}, {k:'email', l:'Email (метка)'}, {k:'enabled', l:'вкл', bool:true},
     {k:'expires_at', l:'Истекает (RFC3339)'}, {k:'quota_gb', l:'Квота, ГБ', num:true},
     {k:'uuid', l:'UUID', wide:true}, {k:'flow', l:'Flow', sel:['','none','xtls-rprx-vision'], labels:{'':'Как в инбаунде',none:'Без Flow','xtls-rprx-vision':'Vision'}}, {k:'sub_token', l:'sub_token', wide:true},
+    {k:'hostname', l:'Имя в DNS (метка зоны)', wide:true},
     {k:'inbounds', l:'Инбаунды клиента', multi:'inbounds', wide:true}
   ],
   routes: [
@@ -153,6 +158,7 @@ const GROUPS = {
                       'public_key','private_key','listen_port_in']]],
   clients: [['Основное',['id','email','enabled','expires_at','quota_gb']],
             ['Ключи',['uuid','flow','sub_token']],
+            ['Имя в сети',['hostname']],
             ['Доступ',['inbounds']]],
   routes: [['Условия',['user','inbound','domain','ip','port','network']],
            ['Куда и где',['node_id','outbound','enabled']]]
@@ -235,6 +241,8 @@ function render(){
   const v = document.getElementById('view');
   if(!ST){ v.textContent='загрузка…'; return; }
   if(TAB==='check') return renderCheck(v);
+  if(TAB==='dns') return renderDNS(v);
+  if(TAB==='panel') return renderPanel(v);
   renderList(v);
 }
 
@@ -464,6 +472,7 @@ function bodyOf(tab,i,r){
     html += `<div class="grp">WireGuard</div><div class="grid">
       <div class="f"><label>Подсеть клиентов</label><input value="${esc(wg.subnet || '10.88.0.0/24')}" onchange="setWGSubnet(${i},this.value.trim())"></div>
       <div class="f"><label>DNS клиентам (IP через запятую)</label><input value="${esc(wg.dns || '1.1.1.1, 1.0.0.1')}" onchange="setWGDNS(${i},this.value.trim())"></div>
+      <div class="f"><label>Выход клиентов</label>${cell(tab,i,r,{k:'egress',l:'Выход клиентов',egress:true})}</div>
       <div class="f wide"><label>Публичный ключ сервера</label><input readonly value="${esc(wg.public_key)}" placeholder="Генерируется при сохранении"></div>
     </div>`;
   }
@@ -498,6 +507,14 @@ function cell(tab,i,r,f){
     const opts = outboundOptions(r.node_id);
     if(val && !opts.includes(val)) opts.push(val);
     return `<select ${on}>${opts.map(o=>`<option ${o===val?'selected':''} value="${esc(o)}">${esc(o)}</option>`).join('')}</select>`;
+  }
+  if(f.egress){
+    // Клиенты WireGuard выходят либо NAT'ом этого узла, либо в туннель отсюда;
+    // block для целой сети смысла не имеет.
+    const opts = ['direct', ...(ST.tunnels||[]).filter(x=>x.enabled && x.from_node_id===r.node_id).map(x=>'tun:'+x.name)];
+    if(val && !opts.includes(val)) opts.push(val);
+    const label = o => o==='direct' ? 'в интернет через этот узел' : (o===''?'—':o);
+    return `<select ${on}>${['',...opts].map(o=>`<option ${o===val?'selected':''} value="${esc(o)}">${esc(label(o))}</option>`).join('')}</select>`;
   }
   if(f.multi){
     const chosen = val||[];
@@ -783,6 +800,113 @@ async function wgConfig(i){
     dialog.showModal();
   }catch(e){ toast(e.message, true); }
 }
+// ---------- DNS клиентской сети: зона рендерится в dnsmasq
+
+function dnsConf(){
+  if(!ST.dns) ST.dns = {root:'', panel:'panel', ttl:60, port:53, upstream:[], node_id:''};
+  return ST.dns;
+}
+function setDNS(key,value){ dnsConf()[key] = value; }
+function wgNodes(){
+  return [...new Set((ST.inbounds||[]).filter(i=>i.kind==='wireguard' && i.enabled).map(i=>i.node_id))];
+}
+function renderDNS(v){
+  const d = dnsConf();
+  const nodes = wgNodes();
+  if(!d.node_id) d.node_id = nodes[0] || LOCAL_NODE;
+  v.innerHTML = `
+  <div class="card"><div class="body">
+    <div class="hint">Корневой домен делает панель авторитетным DNS для клиентской сети: каждый клиент с WireGuard получает имя
+      <b>имя.зона</b>, панель — имя <b>панель.зона</b>. Резолвит dnsmasq на узле, панель только рендерит его конфиг и файл зоны.
+      Клиентам адрес резолвера уходит в их конфиг автоматически (поле «DNS клиентам» в инбаунде, если зона выключена).</div>
+    <div class="grid">
+      <div class="f"><label>Корневой домен (зона)</label><input value="${esc(d.root)}" placeholder="vpn.internal" onchange="setDNS('root',this.value.trim().toLowerCase())"></div>
+      <div class="f"><label>Узел с DNS</label><select onchange="setDNS('node_id',this.value)">
+        ${nodes.length? nodes.map(id=>`<option value="${esc(id)}" ${id===d.node_id?'selected':''}>${esc(nodeLabel(id))}</option>`).join('') : '<option value="">нет включённых WireGuard-инбаундов</option>'}
+      </select></div>
+      <div class="f"><label>Имя панели в зоне</label><input value="${esc(d.panel)}" onchange="setDNS('panel',this.value.trim().toLowerCase())"></div>
+      <div class="f"><label>Порт DNS</label><input type="number" value="${esc(d.port)}" onchange="setDNS('port',Number(this.value)||0)"></div>
+      <div class="f"><label>TTL, сек</label><input type="number" value="${esc(d.ttl)}" onchange="setDNS('ttl',Number(this.value)||0)"></div>
+      <div class="f wide"><label>Upstream (IP или IP:порт, по строке; пусто — резолверы узла из /etc/resolv.conf)</label>
+        <textarea onchange="setDNS('upstream',this.value.split(/[\\n,]+/).map(s=>s.trim()).filter(Boolean))">${esc((d.upstream||[]).join('\n'))}</textarea></div>
+    </div>
+    <div class="row">
+      <button class="b p" onclick="save()">Сохранить и применить</button>
+      <input id="dnsq" placeholder="alice.vpn.internal" style="width:220px" onkeydown="if(event.key==='Enter')dnsCheck()">
+      <button class="b" onclick="dnsCheck()">Что ответит</button>
+    </div>
+    <div id="dns-answer" class="hint"></div>
+  </div></div>
+  <div class="card"><div class="body" id="dns-status"><span class="mut">загрузка…</span></div></div>`;
+  loadDNSStatus();
+}
+async function loadDNSStatus(){
+  const box = document.getElementById('dns-status');
+  if(!box) return;
+  try{
+    const j = await api('/api/dns');
+    const svc = j.service || {};
+    const dnsmasq = !svc.installed ? 'не установлен (apt install dnsmasq)'
+      : (svc.active ? 'работает' : 'установлен, но не запущен');
+    const rows = (j.records||[]).map(r=>`<tr><td>${esc(r.name)}</td><td>${esc(r.ip)}</td><td class="mut">${esc(r.note||r.kind)}</td></tr>`).join('');
+    box.innerHTML = `
+      <div class="grp">Состояние</div>
+      <div class="hint">${j.enabled
+        ? `зона <b>${esc(j.zone)}</b> на узле ${esc(nodeLabel(j.node_id))} · порт ${esc(j.port)} · dnsmasq: ${esc(dnsmasq)}`
+        : 'зона выключена — задай корневой домен и сохрани'}</div>
+      ${j.records && j.records.length ? `<div class="grp">Зона</div><table class="tbl"><tr><th>имя</th><th>адрес</th><th>кто</th></tr>${rows}</table>` : ''}
+      ${j.conf ? `<div class="grp">Конфиг dnsmasq → ${esc(j.path)}</div><pre>${esc(j.conf)}</pre>
+        <div class="grp">Зона → /etc/revhub/dns-hosts</div><pre>${esc(j.hosts)}</pre>` : ''}`;
+  }catch(e){ box.textContent = e.message; }
+}
+async function dnsCheck(){
+  const el = document.getElementById('dnsq'), out = document.getElementById('dns-answer');
+  if(!el || !out) return;
+  try{
+    const j = await api('/api/dns/check?name='+encodeURIComponent(el.value.trim())+'&zone='+encodeURIComponent((ST.dns||{}).root||''));
+    out.innerHTML = j.found
+      ? `${esc(j.name)} → <b>${esc(j.ip)}</b> <span class="mut">(${esc(j.note||j.kind)})</span>`
+      : `${esc(j.name)}: ${esc(j.hint)}`;
+  }catch(e){ out.textContent = e.message; }
+}
+
+// ---------- панель внутри сети WireGuard
+
+function renderPanel(v){
+  if(!ST.panel) ST.panel = {listen:'127.0.0.1:2096'};
+  const p = ST.panel;
+  const addrs = [...new Set((ST.inbounds||[])
+    .filter(i=>i.kind==='wireguard' && i.enabled && i.node_id===LOCAL_NODE && i.wireguard && i.wireguard.subnet)
+    .map(i=>{ const m=/(\d+\.\d+\.\d+)\.\d+\/(\d+)/.exec(i.wireguard.subnet); return m? m[1]+'.1':''; })
+    .filter(Boolean))];
+  const port = (String(p.listen).split(':').pop()||'2096');
+  v.innerHTML = `
+  <div class="card"><div class="body">
+    <div class="hint">Где слушает панель. <b>127.0.0.1</b> — только с самой машины (или через SSH-туннель).
+      <b>Адрес WireGuard</b> (например 10.88.0.1) — панель недоступна из интернета: попасть в неё можно только изнутри VPN,
+      и это видно по адресу в браузере. Адрес применяется перезапуском панели.</div>
+    <div class="grid">
+      <div class="f wide"><label>Адрес прослушивания</label><input value="${esc(p.listen)}" onchange="ST.panel.listen=this.value.trim()"></div>
+    </div>
+    <div class="row">
+      ${addrs.map(a=>`<button class="b" onclick="ST.panel.listen='${esc(a+':'+port)}';render()">из WG: ${esc(a)}</button>`).join('')}
+      <button class="b" onclick="ST.panel.listen='127.0.0.1:${esc(port)}';render()">только localhost</button>
+      <button class="b p" onclick="save()">Сохранить</button>
+      <button class="b" onclick="restartPanel()">Перезапустить панель</button>
+    </div>
+    <div class="hint" id="panel-state">сейчас открыто по ${esc(location.host)} · ${PANEL_TLS?'https':'http'}</div>
+  </div></div>`;
+}
+async function restartPanel(){
+  const state = document.getElementById('panel-state');
+  try{
+    const j = await api('/api/panel/restart',{method:'POST'});
+    const url = (PANEL_TLS?'https://':'http://') + j.addr;
+    if(state) state.innerHTML = `перезапускаю… панель будет по <a href="${esc(url)}">${esc(url)}</a>`;
+    toast('Панель перезапускается: '+j.addr);
+  }catch(e){ toast(e.message, true); }
+}
+
 function renderCheck(v){
   const nodes = ST.nodes||[];
   v.innerHTML = `<div class="hint">Dry-run: первый матч по правилам узла. geoip/geosite локально не раскрываются, поэтому выводятся отдельным списком «могут перехватить».</div>

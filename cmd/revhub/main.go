@@ -13,15 +13,18 @@ import (
 	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"syscall"
 	"time"
 
 	"revhub/internal/api"
@@ -61,6 +64,8 @@ func main() {
 		cmdDemo(os.Args[2:])
 	case "passwd":
 		cmdPasswd(os.Args[2:])
+	case "restart":
+		cmdRestart(os.Args[2:])
 	case "install":
 		cmdInstall(os.Args[2:])
 	case "tls":
@@ -87,6 +92,7 @@ func usage() {
   revhub apply-local [--node <id>] [--state state.json]
   revhub repair   [--etc-dir /etc/revhub]   # юнит xray, sudo, применение конфига
   revhub wg       show interfaces | show <iface> latest-handshakes
+  revhub restart  # перезапустить юнит панели (адрес берётся из состояния)
   revhub validate [--state state.json]
   revhub demo     [--state demo-state.json]
   revhub version
@@ -96,7 +102,7 @@ func usage() {
 
 func cmdServe(args []string) {
 	fs := flag.NewFlagSet("serve", flag.ExitOnError)
-	addr := fs.String("addr", "127.0.0.1:2096", "адрес панели")
+	addr := fs.String("addr", "", "адрес панели (по умолчанию — panel.listen из состояния)")
 	statePath := fs.String("state", "state.json", "файл состояния")
 	outDir := fs.String("out", "out", "каталог артефактов")
 	noAuth := fs.Bool("noauth", false, "без пароля (только loopback, для отладки UI)")
@@ -114,7 +120,15 @@ func cmdServe(args []string) {
 	if err != nil {
 		log.Fatal(err)
 	}
-	srv := &api.Server{Store: st, OutDir: *outDir, NoAuth: *noAuth, Secrets: sec, LocalNode: *localNode, TLSCert: *tlsCert, TLSKey: *tlsKey}
+	// Адрес прослушивания живёт в состоянии: его меняют в панели и панель же
+	// перезапускается. Флаг остался для ручного запуска и отладки.
+	listen := st.Snapshot().Panel.Addr()
+	if *addr != "" {
+		listen = *addr
+	}
+	bin, _ := os.Executable()
+	srv := &api.Server{Store: st, OutDir: *outDir, NoAuth: *noAuth, Secrets: sec,
+		LocalNode: *localNode, TLSCert: *tlsCert, TLSKey: *tlsKey, Bin: bin, Logf: log.Printf}
 	srv.Prov = &provision.Service{Store: st, Secrets: sec, OutDir: *outDir}
 	srv.Apply = &apply.Service{
 		Store: st, Secrets: sec, OutDir: *outDir, StatePath: *statePath,
@@ -124,11 +138,11 @@ func cmdServe(args []string) {
 	srv.Mon = &monitor.Monitor{Store: st}
 
 	if *noAuth {
-		host, _, _ := net.SplitHostPort(*addr)
+		host, _, _ := net.SplitHostPort(listen)
 		if host != "127.0.0.1" && host != "localhost" && host != "::1" {
-			log.Fatalf("--noauth допустим только на loopback, а не на %s", *addr)
+			log.Fatalf("--noauth допустим только на loopback, а не на %s", listen)
 		}
-		log.Printf("ВНИМАНИЕ: --noauth, панель без пароля на %s", *addr)
+		log.Printf("ВНИМАНИЕ: --noauth, панель без пароля на %s", listen)
 	} else {
 		cred, err := auth.Load(*statePath)
 		if err != nil {
@@ -137,7 +151,7 @@ func cmdServe(args []string) {
 		srv.Auth = cred
 	}
 	httpSrv := &http.Server{
-		Addr:              *addr,
+		Addr:              listen,
 		Handler:           srv.Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 		TLSConfig:         &tls.Config{MinVersion: tls.VersionTLS12},
@@ -148,11 +162,51 @@ func cmdServe(args []string) {
 	}
 	srv.Mon.Start(context.Background()) // фоновый мониторинг узлов
 	log.Printf("revhub: панель %s://%s, состояние %s, артефакты %s/, мониторинг каждые %s",
-		scheme, *addr, *statePath, *outDir, srv.Mon.Interval)
+		scheme, listen, *statePath, *outDir, srv.Mon.Interval)
 	if scheme == "https" {
-		log.Fatal(httpSrv.ListenAndServeTLS(*tlsCert, *tlsKey))
+		log.Fatal(serveWithRetry(httpSrv, true, *tlsCert, *tlsKey))
 	}
-	log.Fatal(httpSrv.ListenAndServe())
+	log.Fatal(serveWithRetry(httpSrv, false, "", ""))
+}
+
+// serveWithRetry ждёт появления адреса: в сети WireGuard панель стартует
+// раньше, чем apply поднимет интерфейс, и bind падает с EADDRNOTAVAIL.
+func serveWithRetry(srv *http.Server, useTLS bool, cert, key string) error {
+	host, _, _ := net.SplitHostPort(srv.Addr)
+	isLoop := host == "127.0.0.1" || host == "localhost" || host == "::1"
+	for i := 1; ; i++ {
+		var err error
+		if useTLS {
+			err = srv.ListenAndServeTLS(cert, key)
+		} else {
+			err = srv.ListenAndServe()
+		}
+		if err == nil || err == http.ErrServerClosed || isLoop {
+			return err
+		}
+		if !errors.Is(err, syscall.EADDRNOTAVAIL) {
+			return err
+		}
+		if i >= 40 {
+			return fmt.Errorf("адрес %s так и не появился: %w", srv.Addr, err)
+		}
+		log.Printf("адрес %s ещё не готов (%v), повтор через 3 с", srv.Addr, err)
+		time.Sleep(3 * time.Second)
+	}
+}
+
+// cmdRestart перезапускает юнит панели. Вызывается панелью через sudo:
+// адрес прослушивания берётся из состояния, поэтому смена адреса в UI — это
+// рестарт. --no-block важен: systemd ставит job в очередь и останавливает
+// юнит, не убивая сам вызов (иначе рестарт умер бы вместе с процессом).
+func cmdRestart(args []string) {
+	fs := flag.NewFlagSet("restart", flag.ExitOnError)
+	unit := fs.String("unit", "revhub.service", "юнит панели")
+	fs.Parse(args)
+	out, err := exec.Command("systemctl", "--no-block", "restart", *unit).CombinedOutput()
+	if err != nil {
+		log.Fatalf("systemctl restart %s: %v: %s", *unit, err, strings.TrimSpace(string(out)))
+	}
 }
 
 // cmdPasswd задаёт пароль панели: интерактивно (из stdin, с подтверждением)

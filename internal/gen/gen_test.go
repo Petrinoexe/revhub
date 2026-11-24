@@ -441,14 +441,14 @@ func TestNodePortsCoversInboundsAndListeners(t *testing.T) {
 
 // apply.sh открывает порты сам: свежий VPS с ufw иначе «не пускает» клиентов.
 func TestApplyScriptOpensPorts(t *testing.T) {
-	s := applyScript(nil, false, []string{"443/tcp", "51820/udp"}, false, nil)
+	s := applyScript(nil, false, []string{"443/tcp", "51820/udp"}, false, nil, false)
 	for _, want := range []string{"ufw status", `ufw allow "443/tcp"`, `ufw allow "51820/udp"`, "firewall-cmd --permanent --add-port"} {
 		if !strings.Contains(s, want) {
 			t.Errorf("в apply.sh нет %q", want)
 		}
 	}
 	// без портов — никаких обращений к firewall
-	if s := applyScript(nil, false, nil, false, nil); strings.Contains(s, "ufw") {
+	if s := applyScript(nil, false, nil, false, nil, false); strings.Contains(s, "ufw") {
 		t.Error("ufw вызывается без портов")
 	}
 }
@@ -461,7 +461,7 @@ func TestApplyRestoresXrayConfigOnFailedRestart(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	write("apply.sh", applyScript(nil, true, []string{"443/tcp"}, false, nil), 0o700)
+	write("apply.sh", applyScript(nil, true, []string{"443/tcp"}, false, nil, false), 0o700)
 	write("xray.json", "new", 0o600)
 	write("running.json", "old", 0o600)
 	write("systemctl", "#!/bin/sh\n[ \"$*\" = 'restart xray' ] && [ \"$(cat \"$XRAY_CONFIG\")\" = old ]\n", 0o700)
@@ -495,7 +495,7 @@ func TestWGExitArtifactsDoNotRequireXray(t *testing.T) {
 	if iface == "" || len(iface) > 15 {
 		t.Fatalf("invalid WG interface name: %q", iface)
 	}
-	if !strings.Contains(script, "wg-quick up") || strings.Contains(script, "systemctl restart") {
+	if !strings.Contains(script, "wg-quick up") || strings.Contains(script, "restart xray") {
 		t.Fatal("a WG-only exit must only apply WireGuard")
 	}
 }

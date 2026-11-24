@@ -204,6 +204,21 @@ func Run(o Options) (*Report, error) {
 		return "поставлены: wireguard-tools, nftables", nil
 	})
 
+	// dnsmasq — резолвер клиентской сети. Пакет не критичен для панели:
+	// без него WireGuard и VLESS работают, DNS-зона просто не поднимется.
+	r.step("пакеты dnsmasq (DNS клиентов)", func() (string, error) {
+		if o.SkipPkgs {
+			return "пропущено флагом --skip-packages", errSkip
+		}
+		if _, err := lookPath("dnsmasq"); err == nil {
+			return "уже стоит: dnsmasq", nil
+		}
+		if _, err := r.installPkgs("dnsmasq"); err != nil {
+			return "dnsmasq не встал (" + err.Error() + "): зона DNS не поднимется, поставь пакет вручную", nil
+		}
+		return "поставлен: dnsmasq", nil
+	})
+
 	if err := r.firstStepError(); err != nil {
 		return rep, err
 	}
@@ -1065,6 +1080,20 @@ func upgradePanelUnit(path string) (bool, error) {
 				lines[i] = line + " AF_NETLINK"
 				changed = true
 			}
+		case strings.Contains(line, "ExecStart=") && strings.Contains(line, " serve ") && strings.Contains(line, " --addr "):
+			// Адрес теперь в состоянии (panel.listen): иначе установленная
+			// панель не смогла бы его менять — юнит перетирал бы её выбор.
+			fields := strings.Fields(line)
+			kept := fields[:0:0]
+			for i2 := 0; i2 < len(fields); i2++ {
+				if fields[i2] == "--addr" && i2+1 < len(fields) {
+					i2++
+					continue
+				}
+				kept = append(kept, fields[i2])
+			}
+			lines[i] = strings.Join(kept, " ")
+			changed = true
 		}
 	}
 	if !changed {
@@ -1337,6 +1366,7 @@ func writeState(o Options, cfg *tlsCfg, rep *Report) (model.State, error) {
 	if st.Routes == nil {
 		st.Routes = []model.Rule{}
 	}
+	st.Panel = &model.PanelConfig{Listen: o.PanelAddr}
 	st.Normalize()
 	if err := st.Validate(); err != nil {
 		return st, fmt.Errorf("состояние не прошло валидацию: %w", err)
@@ -1411,7 +1441,9 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-%[8]sExecStart=%[2]s serve --state %[3]s --out %[4]s --addr %[5]s%[6]s
+# Адрес прослушивания живёт в state.json (panel.listen): его меняют в панели,
+# и панель сама перезапускает юнит. Флаг --addr остался для ручного запуска.
+%[8]sExecStart=%[2]s serve --state %[3]s --out %[4]s%[6]s
 Restart=on-failure
 RestartSec=3
 StateDirectory=revhub

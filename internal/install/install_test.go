@@ -804,11 +804,16 @@ RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
 		"ProtectSystem=full",
 		"ReadWritePaths=/etc/revhub /var/lib/revhub /usr/local/etc/xray /etc/wireguard -/run/sudo",
 		"RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK",
-		"ExecStart=/usr/local/bin/revhub serve --addr 0.0.0.0:65423",
+		"ExecStart=/usr/local/bin/revhub serve",
 	} {
 		if !strings.Contains(string(got), want) {
 			t.Errorf("нет %q:\n%s", want, got)
 		}
+	}
+	// Адрес переехал в state.json (panel.listen): флаг из старого юнита убран,
+	// иначе установленная панель не смогла бы его менять.
+	if strings.Contains(string(got), "--addr") {
+		t.Errorf("старый --addr остался в юните:\n%s", got)
 	}
 	// повторный прогон ничего не меняет
 	if changed, err := upgradePanelUnit(p); err != nil || changed {

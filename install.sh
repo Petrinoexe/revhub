@@ -204,6 +204,7 @@ if [ "$SANDBOX" = 0 ]; then
   for c in curl tar unzip; do command -v "$c" >/dev/null 2>&1 || need="$need $c"; done
   [ -f /etc/ssl/certs/ca-certificates.crt ] || need="$need ca-certificates"
   command -v wg-quick >/dev/null 2>&1 || need="$need wireguard-tools"
+  command -v dnsmasq >/dev/null 2>&1 || need="$need dnsmasq"
   command -v nft >/dev/null 2>&1 || command -v iptables >/dev/null 2>&1 || need="$need nftables"
   command -v git >/dev/null 2>&1 || need="$need git"
   if [ -n "${need// /}" ]; then

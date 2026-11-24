@@ -42,6 +42,9 @@ type State struct {
 	Tunnels  []Tunnel  `json:"tunnels"`
 	Clients  []Client  `json:"clients"`
 	Routes   []Rule    `json:"routes"`
+
+	DNS   *DNSConfig   `json:"dns,omitempty"`   // зона имён внутри WireGuard
+	Panel *PanelConfig `json:"panel,omitempty"` // где слушает панель
 }
 
 type Node struct {
@@ -99,6 +102,10 @@ type Inbound struct {
 	CertSHA256 string            `json:"cert_sha256,omitempty"` // SHA-256 of a self-signed panel certificate
 	Enabled    bool              `json:"enabled"`
 	WireGuard  *WireGuardInbound `json:"wireguard,omitempty"`
+
+	// Egress — куда инбаунд выпускает клиентов: пусто/direct — в интернет через
+	// этот узел (NAT), tun:<имя> — в туннель, начинающийся здесь.
+	Egress string `json:"egress,omitempty"`
 }
 
 type Tunnel struct {
@@ -143,15 +150,17 @@ type Tunnel struct {
 }
 
 type Client struct {
-	ID        string                   `json:"id"`
-	Email     string                   `json:"email"`
-	UUID      string                   `json:"uuid"`
-	Enabled   bool                     `json:"enabled"`
-	ExpiresAt string                   `json:"expires_at"` // RFC3339, пусто = бессрочно
-	QuotaGB   float64                  `json:"quota_gb"`   // 0 = без квоты
-	Inbounds  []string                 `json:"inbounds"`   // id инбаундов
-	SubToken  string                   `json:"sub_token"`
-	Flow      string                   `json:"flow"`
+	ID        string   `json:"id"`
+	Email     string   `json:"email"`
+	UUID      string   `json:"uuid"`
+	Enabled   bool     `json:"enabled"`
+	ExpiresAt string   `json:"expires_at"` // RFC3339, пусто = бессрочно
+	QuotaGB   float64  `json:"quota_gb"`   // 0 = без квоты
+	Inbounds  []string `json:"inbounds"`   // id инбаундов
+	SubToken  string   `json:"sub_token"`
+	Flow      string   `json:"flow"`
+	// Hostname — метка имени в зоне DNS: alice + зона revhub.internal.
+	Hostname  string                   `json:"hostname,omitempty"`
 	WireGuard map[string]WireGuardPeer `json:"wireguard,omitempty"` // по ID инбаунда
 }
 
@@ -368,6 +377,7 @@ func (s *State) Normalize() {
 			n.SSHAddr = host + ":22"
 		}
 	}
+	s.assignWireGuardSubnets()
 	for i := range s.Inbounds {
 		in := &s.Inbounds[i]
 		if in.Kind == "" {
@@ -455,6 +465,8 @@ func (s *State) Normalize() {
 		}
 	}
 	s.normalizeWireGuardPeers()
+	s.normalizeDNSHostnames()
+	s.normalizeDNS()
 }
 
 // ValidTags возвращает теги исходящих, существующие на узле. Тег туннеля
@@ -515,6 +527,9 @@ func (s State) Validate() error {
 	if len(s.Nodes) == 0 {
 		add("нет ни одного узла")
 	}
+
+	s.validateDNS(add)
+	s.validatePanel(add)
 
 	tags := map[string]bool{}
 	for i, in := range s.Inbounds {

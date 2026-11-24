@@ -25,6 +25,9 @@ func XrayConfig(st model.State, nodeID string) (map[string]any, error) {
 		if in.NodeID != nodeID || !in.Enabled {
 			continue
 		}
+		if in.Kind == model.InboundWireGuard {
+			continue // ядерный интерфейс, не инбаунд xray
+		}
 		ib, err := buildInbound(st, in)
 		if err != nil {
 			return nil, fmt.Errorf("инбаунд %s: %w", in.Tag, err)
@@ -118,9 +121,6 @@ func apiInbound() map[string]any {
 }
 
 func buildInbound(st model.State, in model.Inbound) (map[string]any, error) {
-	if in.Kind == model.InboundWireGuard {
-		return buildWireGuardInbound(st, in)
-	}
 	clients := []any{}
 	for _, c := range st.Clients {
 		if !c.Enabled || !contains(c.Inbounds, in.ID) {

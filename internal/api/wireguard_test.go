@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -40,7 +41,8 @@ func TestWireGuardClientSubscription(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	handler := (&Server{Store: db, NoAuth: true}).Handler()
+	outDir := t.TempDir()
+	handler := (&Server{Store: db, NoAuth: true, OutDir: outDir}).Handler()
 	request := func(method, path string, body []byte) *httptest.ResponseRecorder {
 		w := httptest.NewRecorder()
 		handler.ServeHTTP(w, httptest.NewRequest(method, path, bytes.NewReader(body)))
@@ -107,19 +109,50 @@ func TestWireGuardClientSubscription(t *testing.T) {
 	if wg.User.Username() != peer.PrivateKey || wg.Query().Get("presharedkey") != peer.PresharedKey || wg.Query().Get("publickey") != st.Inbounds[1].WireGuard.PublicKey {
 		t.Fatal("subscription does not match the saved credentials")
 	}
+	// Клиентский WireGuard — ядерный интерфейс: в конфиге xray его нет,
+	// вместо этого рендерится wg-quick конфиг узла.
 	preview := request(http.MethodGet, "/api/preview?node=hub", nil)
-	if !bytes.Contains(preview.Body.Bytes(), []byte(`"protocol": "wireguard"`)) || bytes.Contains(preview.Body.Bytes(), []byte(peer.PrivateKey)) {
-		t.Fatal("incorrect WireGuard server config")
+	if bytes.Contains(preview.Body.Bytes(), []byte(`"protocol": "wireguard"`)) ||
+		bytes.Contains(preview.Body.Bytes(), []byte(peer.PrivateKey)) ||
+		bytes.Contains(preview.Body.Bytes(), []byte(peer.PublicKey)) {
+		t.Fatal("WireGuard clients must not be rendered into xray.json")
 	}
-	if !bytes.Contains(preview.Body.Bytes(), []byte(peer.PublicKey)) {
-		t.Fatal("active WireGuard peer was not rendered")
+	rendered := request(http.MethodPost, "/api/render", []byte(`{"node":"hub"}`))
+	var files struct {
+		Files []struct {
+			Name string `json:"name"`
+		} `json:"files"`
+	}
+	if err := json.Unmarshal(rendered.Body.Bytes(), &files); err != nil {
+		t.Fatalf("render: %v: %s", err, rendered.Body.String())
+	}
+	confPath := ""
+	for _, f := range files.Files {
+		if strings.HasSuffix(f.Name, ".conf") {
+			confPath = filepath.Join(outDir, "hub", f.Name)
+		}
+	}
+	if confPath == "" {
+		t.Fatalf("wg-quick конфиг клиентов не отрендерился: %s", rendered.Body.String())
+	}
+	conf, err := os.ReadFile(confPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"ListenPort = 51820", "AllowedIPs = " + peer.Address, peer.PublicKey} {
+		if !bytes.Contains(conf, []byte(want)) {
+			t.Errorf("в конфиге интерфейса нет %q:\n%s", want, conf)
+		}
+	}
+	if bytes.Contains(conf, []byte(peer.PrivateKey)) {
+		t.Error("приватный ключ клиента не должен попадать в конфиг узла")
 	}
 	for _, inactive := range st.Clients[1:] {
 		other := inactive.WireGuard["in-wg"]
 		if other.Address == "" || other.Address == peer.Address || other.PublicKey == peer.PublicKey {
 			t.Fatal("clients must have separate WireGuard credentials and addresses")
 		}
-		if bytes.Contains(preview.Body.Bytes(), []byte(other.PublicKey)) || request(http.MethodGet, "/sub/"+inactive.SubToken, nil).Body.Len() != 0 {
+		if bytes.Contains(conf, []byte(other.PublicKey)) || request(http.MethodGet, "/sub/"+inactive.SubToken, nil).Body.Len() != 0 {
 			t.Fatal("inactive WireGuard client was included in the config or subscription")
 		}
 	}

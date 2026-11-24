@@ -3,7 +3,9 @@ package model
 import (
 	"crypto/ecdh"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
+	"fmt"
 	"net/netip"
 	"slices"
 	"strings"
@@ -151,6 +153,87 @@ func (wg WireGuardInbound) ServerAddress() string {
 	return p.Addr().Next().String()
 }
 
+// ServerAddressPrefix — адрес сервера с маской подсети (для wg-quick:
+// 10.88.0.1/24). Пусто, если подсеть невалидна.
+func (wg WireGuardInbound) ServerAddressPrefix() string {
+	p, ok := wireGuardSubnet(wg.Subnet)
+	if !ok {
+		return ""
+	}
+	return netip.PrefixFrom(p.Addr().Next(), p.Bits()).String()
+}
+
+// WGInterface — имя ядерного интерфейса клиентского инбаунда. Имена сетевых
+// интерфейсов ограничены 15 символами, поэтому длинный тег уходит в хеш.
+func (in Inbound) WGInterface() string {
+	name := "wgc-" + in.Tag
+	if len(name) <= 15 && !strings.ContainsFunc(name, func(c rune) bool {
+		return !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || strings.ContainsRune("_=+.-", c))
+	}) {
+		return name
+	}
+	sum := sha256.Sum256([]byte(in.ID + "/" + in.Tag))
+	return fmt.Sprintf("wgc-%x", sum[:5])
+}
+
+// assignWireGuardSubnets выдаёт подсети клиентским инбаундам, у которых она не
+// задана: первый свободный 10.88.N.0/24 на узле. Две одинаковые подсети на
+// одном узле — это одна таблица маршрутов с неоднозначными адресами, поэтому
+// новому инбаунду достаётся следующий номер, а не общий дефолт.
+func (s *State) assignWireGuardSubnets() {
+	used := make([]netip.Prefix, 0, len(s.Inbounds))
+	for i := range s.Inbounds {
+		in := &s.Inbounds[i]
+		if in.Kind != InboundWireGuard {
+			continue
+		}
+		if in.WireGuard == nil {
+			in.WireGuard = &WireGuardInbound{}
+		}
+		if p, ok := wireGuardSubnet(in.WireGuard.Subnet); ok {
+			used = append(used, p)
+			continue
+		}
+		for n := 0; n < 256; n++ {
+			cand, err := netip.ParsePrefix(fmt.Sprintf("10.88.%d.0/24", n))
+			if err != nil {
+				break
+			}
+			free := true
+			for _, u := range used {
+				if u.Overlaps(cand) {
+					free = false
+					break
+				}
+			}
+			if !free {
+				continue
+			}
+			in.WireGuard.Subnet = cand.String()
+			used = append(used, cand)
+			break
+		}
+	}
+}
+
+// validateEgress проверяет, куда инбаунд выпускает клиентов: напрямую через
+// этот узел или в туннель, который начинается здесь же.
+func validateEgress(s State, in Inbound) error {
+	if in.Egress == "" || in.Egress == TagDirect {
+		return nil
+	}
+	name, ok := strings.CutPrefix(in.Egress, TagTunnel)
+	if !ok {
+		return fmt.Errorf("выход %q: нужен direct или tun:<имя>", in.Egress)
+	}
+	for _, t := range s.Tunnels {
+		if t.Name == name && t.Enabled && t.FromNode == in.NodeID {
+			return nil
+		}
+	}
+	return fmt.Errorf("выход %q: нет включённого туннеля %s на узле %s", in.Egress, name, in.NodeID)
+}
+
 func (s State) validateWireGuard(in Inbound, add func(string, ...any)) {
 	if ip, err := netip.ParseAddr(in.Listen); err != nil || ip.Zone() != "" {
 		add("инбаунд %s: WireGuard требует IP в поле listen", in.Tag)
@@ -163,6 +246,25 @@ func (s State) validateWireGuard(in Inbound, add func(string, ...any)) {
 	p, ok := wireGuardSubnet(wg.Subnet)
 	if !ok {
 		add("инбаунд %s: нужна IPv4-подсеть WireGuard от /8 до /30", in.Tag)
+	} else {
+		// Клиенты всех инбаундов одного узла живут в его таблице маршрутов:
+		// две одинаковые подсети (или пересечение) сделают адреса неоднозначными.
+		for _, other := range s.Inbounds {
+			if other.ID == in.ID || other.Kind != InboundWireGuard || other.NodeID != in.NodeID || other.WireGuard == nil {
+				continue
+			}
+			q, ok := wireGuardSubnet(other.WireGuard.Subnet)
+			if !ok {
+				continue
+			}
+			if p.Overlaps(q) {
+				add("инбаунд %s: подсеть %s пересекается с инбаундом %s (%s) на узле %s",
+					in.Tag, wg.Subnet, other.Tag, other.WireGuard.Subnet, in.NodeID)
+			}
+		}
+	}
+	if err := validateEgress(s, in); err != nil {
+		add("инбаунд %s: %v", in.Tag, err)
 	}
 	if wg.DNS != "" {
 		for _, part := range strings.Split(wg.DNS, ",") {
