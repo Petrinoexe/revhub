@@ -66,6 +66,8 @@ func main() {
 		cmdPasswd(os.Args[2:])
 	case "restart":
 		cmdRestart(os.Args[2:])
+	case "panel":
+		cmdPanel(os.Args[2:])
 	case "install":
 		cmdInstall(os.Args[2:])
 	case "tls":
@@ -93,6 +95,10 @@ func usage() {
   revhub repair   [--etc-dir /etc/revhub]   # юнит xray, sudo, применение конфига
   revhub wg       show interfaces | show <iface> latest-handshakes
   revhub restart  # перезапустить юнит панели (адрес берётся из состояния)
+  revhub panel    [show|list]        # какой адрес слушает панель и какие есть
+  revhub panel    set <адрес>       # localhost | wg[:<тег>] | <ip|host>[:порт]
+  revhub panel    wg [<тег>]        # переключить на адрес WireGuard-интерфейса
+  revhub panel    localhost         # только петля (доступ через ssh-туннель)
   revhub validate [--state state.json]
   revhub demo     [--state demo-state.json]
   revhub version
