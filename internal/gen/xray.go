@@ -132,9 +132,6 @@ func buildInbound(st model.State, in model.Inbound) (map[string]any, error) {
 		}
 		clients = append(clients, cl)
 	}
-	if len(clients) == 0 {
-		return nil, fmt.Errorf("нет ни одного активного клиента")
-	}
 	settings := map[string]any{
 		"clients":    clients,
 		"decryption": "none",

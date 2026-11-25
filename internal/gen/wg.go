@@ -369,7 +369,10 @@ func ClientWGConf(st model.State, in model.Inbound, nodeID string) (string, erro
 		peers++
 	}
 	if peers == 0 {
-		return "", fmt.Errorf("нет ни одного активного клиента WireGuard")
+		// Инбаунд без клиентов — законное состояние: интерфейс поднимается,
+		// пиры появятся, когда клиентов создадут. Раньше это валило применение
+		// и выглядело как «инбаунд не создался».
+		b.WriteString("\n# клиентов пока нет: пиры появятся при их создании\n")
 	}
 	return b.String(), nil
 }

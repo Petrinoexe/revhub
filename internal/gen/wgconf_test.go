@@ -113,7 +113,8 @@ func TestXrayRestartsBeforeWireGuard(t *testing.T) {
 	}
 }
 
-// Только включённые клиенты; без них интерфейс не поднимается.
+// В конфиг попадают только включённые клиенты. Инбаунд без клиентов — тоже
+// законный случай: интерфейс поднимается пустым, пиры появятся позже.
 func TestClientWGConfSkipsInactive(t *testing.T) {
 	st := clientNetState()
 	st.Clients[1].Enabled = false
@@ -125,8 +126,15 @@ func TestClientWGConfSkipsInactive(t *testing.T) {
 		t.Error("выключенный клиент попал в конфиг")
 	}
 	st.Clients[0].Enabled = false
-	if _, err := ClientWGConf(st, st.Inbounds[0], "hub"); err == nil {
-		t.Fatal("без клиентов конфиг не должен рендериться")
+	empty, err := ClientWGConf(st, st.Inbounds[0], "hub")
+	if err != nil {
+		t.Fatalf("инбаунд без клиентов должен рендериться: %v", err)
+	}
+	if strings.Contains(empty, "[Peer]") {
+		t.Error("при отсутствии клиентов секций [Peer] быть не должно")
+	}
+	if !strings.Contains(empty, "Address = 10.88.0.1/24") {
+		t.Errorf("интерфейс должен остаться:\n%s", empty)
 	}
 }
 

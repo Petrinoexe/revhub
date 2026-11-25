@@ -139,8 +139,8 @@ func TestApplyFallsBackWhenArtifactsDirIsNotWritable(t *testing.T) {
 	}
 }
 
-// Ошибка рендера (например, у инбаунда нет ни одного клиента) — провал
-// применения, а не «пропущено»: иначе UI её спрячет и всё выглядит зелёным.
+// Ошибка рендера (например, битые ключи туннеля) — провал применения, а не
+// «пропущено»: иначе UI её спрячет и всё выглядит зелёным.
 func TestApplyRenderErrorIsFailureNotSkip(t *testing.T) {
 	helper := writeHelper(t, "#!/bin/sh\nexit 0\n")
 	dir := t.TempDir()
@@ -150,23 +150,27 @@ func TestApplyRenderErrorIsFailureNotSkip(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := st.Replace(model.State{Version: model.StateVersion,
-		Nodes: []model.Node{{ID: "hub"}},
-		Inbounds: []model.Inbound{{ID: "in-1", NodeID: "hub", Tag: "vless", Kind: "vless",
-			Port: 443, Transport: "tcp", Security: "none", Enabled: true}}}); err != nil {
+		Nodes: []model.Node{
+			{ID: "hub", PublicAddr: "hub.example.com"},
+			{ID: "exit", PublicAddr: "exit.example.com"},
+		},
+		Tunnels: []model.Tunnel{{ID: "t1", Name: "eu", Kind: model.TunnelWG, Enabled: true,
+			FromNode: "hub", ToNode: "exit", Subnet: "10.77.1.0/30", ListenPort: 51900, Mark: 300,
+			FromKeyPriv: "не-ключ", FromKeyPub: "не-ключ", ToKeyPriv: "не-ключ", ToKeyPub: "не-ключ"}}}); err != nil {
 		t.Fatal(err)
 	}
 	svc := &Service{Store: st, OutDir: filepath.Join(dir, "out"), StatePath: statePath,
 		LocalNode: "hub", Bin: helper, Method: "direct"}
 
 	rep := svc.ApplyNow("save")
-	if len(rep.Nodes) != 1 {
-		t.Fatalf("ожидался один узел: %+v", rep.Nodes)
+	if len(rep.Nodes) == 0 {
+		t.Fatalf("ожидался хотя бы один узел: %+v", rep.Nodes)
 	}
 	res := rep.Nodes[0]
 	if res.OK || res.Skipped {
 		t.Fatalf("ошибка рендера должна быть провалом, а не пропуском: %+v", res)
 	}
-	if !strings.Contains(res.Err, "клиент") {
+	if !strings.Contains(res.Err, "ключ") {
 		t.Fatalf("причина не названа: %q", res.Err)
 	}
 }
