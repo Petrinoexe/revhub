@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"fmt"
+	"net"
 	"net/netip"
 	"slices"
 	"strings"
@@ -52,6 +53,82 @@ func (in *Inbound) normalizeWireGuard() {
 		wg.DNS = DefaultWireGuardDNS
 	}
 	fillWGKeys(&wg.PrivateKey, &wg.PublicKey)
+}
+
+// SharedSubnet — общая сеть: клиенты, хаб и выходы в одной подсети.
+func (s State) SharedSubnet() string {
+	for _, in := range s.Inbounds {
+		if in.Kind == InboundWireGuard && in.WireGuard != nil && in.WireGuard.Subnet != "" {
+			return in.WireGuard.Subnet
+		}
+	}
+	return DefaultWireGuardSubnet
+}
+
+// assignTunnelAddresses раскладывает концы туннелей по общей сети: хаб .200+,
+// выходы .250+. Отдельная /30 больше не нужна: маршруты и правила считаются
+// по одной сети, а адрес выхода — обычный адрес в ней (к нему и маршрутят
+// клиентов). Занятые адреса клиентов и адрес хаба обходим.
+func (s *State) assignTunnelAddresses() {
+	_, ipnet, err := net.ParseCIDR(s.SharedSubnet())
+	if err != nil || ipnet == nil {
+		return
+	}
+	base := ipnet.IP.To4()
+	if base == nil {
+		return
+	}
+	taken := map[byte]bool{1: true} // .1 — хаб
+	for _, in := range s.Inbounds {
+		if in.Kind != InboundWireGuard || in.WireGuard == nil {
+			continue
+		}
+		if ip := net.ParseIP(in.WireGuard.ServerAddress()); ip != nil {
+			if v4 := ip.To4(); v4 != nil {
+				taken[v4[3]] = true
+			}
+		}
+	}
+	for _, c := range s.Clients {
+		for _, p := range c.WireGuard {
+			if ip := net.ParseIP(p.Address); ip != nil {
+				if v4 := ip.To4(); v4 != nil {
+					taken[v4[3]] = true
+				}
+			}
+		}
+	}
+	next := func(from int) byte {
+		for i := from; i < 255; i++ {
+			if !taken[byte(i)] {
+				taken[byte(i)] = true
+				return byte(i)
+			}
+		}
+		return 0
+	}
+	for i := range s.Tunnels {
+		t := &s.Tunnels[i]
+		if t.Kind != TunnelWG && t.Kind != TunnelWGReverse {
+			continue
+		}
+		if t.FromAddr == "" {
+			if b := next(200); b != 0 {
+				ip := make(net.IP, 4)
+				copy(ip, base)
+				ip[3] = b
+				t.FromAddr = ip.String()
+			}
+		}
+		if t.ToAddr == "" {
+			if b := next(250); b != 0 {
+				ip := make(net.IP, 4)
+				copy(ip, base)
+				ip[3] = b
+				t.ToAddr = ip.String()
+			}
+		}
+	}
 }
 
 func (s *State) normalizeWireGuardPeers() {
@@ -261,21 +338,6 @@ func (s State) validateWireGuard(in Inbound, add func(string, ...any)) {
 				add("инбаунд %s: подсеть %s пересекается с инбаундом %s (%s) на узле %s",
 					in.Tag, wg.Subnet, other.Tag, other.WireGuard.Subnet, in.NodeID)
 			}
-		}
-	}
-	// Та же подсеть у туннеля на этом узле — тоже конфликт адресов: его конец
-	// возьмёт .1, и наш интерфейс упадёт на «Address already in use».
-	for _, t := range s.Tunnels {
-		if !t.Enabled || !t.Touches(in.NodeID) {
-			continue
-		}
-		q, err := netip.ParsePrefix(t.Subnet)
-		if err != nil {
-			continue
-		}
-		if p.Overlaps(q) {
-			add("инбаунд %s: подсеть %s пересекается с туннелем %s (%s) на узле %s",
-				in.Tag, wg.Subnet, t.Name, t.Subnet, in.NodeID)
 		}
 	}
 	if err := validateEgress(s, in); err != nil {

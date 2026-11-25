@@ -389,6 +389,22 @@ function egressPanelHTML(){
       <div class="f wide"><label>выход</label>
         <select onchange="setEgress(${i},this.value)">${opts.join('')}</select></div>
     </div>`;
+    // Личные выходы пиров: маршрут по конкретному клиенту важнее выхода сети.
+    const members = (ST.clients||[]).map((c,ci)=>({c,ci}))
+      .filter(x=>x.c.enabled && (x.c.inbounds||[]).includes(r.id));
+    if(members.length){
+      html += `<div class="hint" style="margin-top:6px">личные выходы пиров — важнее выхода всей сети:</div>`;
+      for(const {c,ci} of members){
+        const ce = c.egress || '';
+        const copts = [`<option value="" ${ce===''?'selected':''}>как у сети</option>`,
+                       `<option value="direct" ${ce==='direct'?'selected':''}>напрямую</option>`]
+          .concat(tuns.map(t=>`<option value="tun:${esc(t.name)}" ${ce==='tun:'+t.name?'selected':''}>через «${esc(t.name)}»</option>`));
+        html += `<div class="grid" style="margin:4px 0">
+          <div class="f"><label>${esc(c.email)}</label></div>
+          <div class="f wide"><select onchange="setClientEgress(${ci},this.value)">${copts.join('')}</select></div>
+        </div>`;
+      }
+    }
     if(!known) html += `<div class="hint">⚠ туннель «${esc(cur.slice(4))}» не найден на узле ${esc(node)} — маршрут не соберётся, выберите другой выход.</div>`;
     const t = tuns.find(x=>'tun:'+x.name===cur);
     // Без NAT на выходном узле пакеты уходят в интернет с адресом 10.88.0.x и
@@ -404,6 +420,13 @@ function egressPanelHTML(){
 
 function setEgress(i, v){
   if(ST.inbounds && ST.inbounds[i]) ST.inbounds[i].egress = v;
+  render();
+}
+
+function setClientEgress(i, v){
+  const c = ST.clients && ST.clients[i];
+  if(!c) return;
+  if(v) c.egress = v; else delete c.egress;
   render();
 }
 
@@ -576,7 +599,8 @@ function cell(tab,i,r,f){
     const pool = new Map(memberOptions(r, f.multi));
     for(const value of chosen){ if(!pool.has(value)) pool.set(value, value+' (вне выбора)'); }
     if(!pool.size) return '<span class="mut">нет доступных вариантов</span>';
-    return '<div class="ms">' + [...pool].map(([id,label])=>{
+    return '<div class="ms"><div class="row" style="margin:0 0 6px"><button type="button" class="b" onclick="pickAll(this,true)">все</button>'+
+      '<button type="button" class="b" onclick="pickAll(this,false)">никого</button></div>' + [...pool].map(([id,label])=>{
       return `<label><input type="checkbox" value="${esc(id)}" ${chosen.includes(id)?'checked':''}
         onchange="toggleMember('${tab}',${i},'${f.k}',this.value,this.checked)"> ${esc(label)}</label>`;
     }).join('') + '</div>';
@@ -636,6 +660,13 @@ function nextWGPort(inbound){
   while(ports.has(port) && port<65535) port++;
   return port;
 }
+// pickAll — отметить все пункты мультивыбора: «все клиенты» одним нажатием.
+function pickAll(el, on){
+  el.closest('.ms').querySelectorAll('input[type=checkbox]').forEach(cb=>{
+    if(cb.checked !== on){ cb.checked = on; cb.dispatchEvent(new Event('change',{bubbles:true})); }
+  });
+}
+
 function toggleMember(tab,i,key,id,checked){
   const r = ST[tab][i];
   const list = new Set(r[key]||[]);

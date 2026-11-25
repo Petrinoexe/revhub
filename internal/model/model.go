@@ -117,14 +117,18 @@ type Tunnel struct {
 	Enabled  bool   `json:"enabled"`
 
 	// WireGuard
-	Subnet        string `json:"subnet"` // 10.77.N.0/30
-	ListenPort    int    `json:"listen_port"`
-	Keepalive     int    `json:"keepalive"`
-	FromKeyPriv   string `json:"from_key_private"`
-	FromKeyPub    string `json:"from_key_public"`
-	ToKeyPriv     string `json:"to_key_private"`
-	ToKeyPub      string `json:"to_key_public"`
-	Mark          int    `json:"mark"`
+	Subnet      string `json:"subnet"` // 10.77.N.0/30
+	ListenPort  int    `json:"listen_port"`
+	Keepalive   int    `json:"keepalive"`
+	FromKeyPriv string `json:"from_key_private"`
+	FromKeyPub  string `json:"from_key_public"`
+	ToKeyPriv   string `json:"to_key_private"`
+	ToKeyPub    string `json:"to_key_public"`
+	Mark        int    `json:"mark"`
+	// Адреса концов туннеля в общей сети (клиенты и выходы живут в одной
+	// подсети). Заполняются Normalize: хаб .200+, выходы .250+.
+	FromAddr      string `json:"from_addr"`
+	ToAddr        string `json:"to_addr"`
 	PublicPort    int    `json:"public_port"`    // внешний порт, если NAT мапит не в ListenPort
 	EgressIface   string `json:"egress_iface"`   // на стороне to: куда NAT'ить
 	ForwardPolicy bool   `json:"forward_policy"` // to: включить ip_forward и NAT
@@ -159,6 +163,10 @@ type Client struct {
 	Inbounds  []string `json:"inbounds"`   // id инбаундов
 	SubToken  string   `json:"sub_token"`
 	Flow      string   `json:"flow"`
+	// Egress — личный выход пира: пусто = как у инбаунда, direct = напрямую,
+	// tun:<имя> = в конкретный туннель. Позволяет маршрутизировать клиентов
+	// по одному в разные выходные узлы.
+	Egress string `json:"egress,omitempty"`
 	// Hostname — метка имени в зоне DNS: alice + зона revhub.internal.
 	Hostname  string                   `json:"hostname,omitempty"`
 	WireGuard map[string]WireGuardPeer `json:"wireguard,omitempty"` // по ID инбаунда
@@ -252,8 +260,25 @@ func GenShortID() string { return randHex(8) }
 
 func GenToken() string { return randHex(16) }
 
+// Addrs — адреса концов туннеля. Если заданы явно (общая сеть), берём их,
+// иначе считаем из старой /30 — состояние с прошлых версий должно читаться.
+func (t Tunnel) Addrs() (from, to string, err error) {
+	if t.FromAddr != "" && t.ToAddr != "" {
+		for _, a := range []string{t.FromAddr, t.ToAddr} {
+			if net.ParseIP(a) == nil || net.ParseIP(a).To4() == nil {
+				return "", "", fmt.Errorf("адрес туннеля %q не IPv4", a)
+			}
+		}
+		if t.FromAddr == t.ToAddr {
+			return "", "", fmt.Errorf("концы туннеля %s совпадают", t.Name)
+		}
+		return t.FromAddr, t.ToAddr, nil
+	}
+	return SubnetAddrs(t.Subnet)
+}
+
 // SubnetAddrs возвращает адреса концов туннеля для подсети /30:
-// from = .1, to = .2.
+// from = .1, to = .2. Осталось для состояний с прошлых версий.
 func SubnetAddrs(subnet string) (from, to string, err error) {
 	_, ipnet, err := net.ParseCIDR(subnet)
 	if err != nil {
@@ -378,6 +403,8 @@ func (s *State) Normalize() {
 		}
 	}
 	s.assignWireGuardSubnets()
+	// Общая сеть: клиенты и выходы вместе, туннели получают в ней адреса.
+	s.assignTunnelAddresses()
 	for i := range s.Inbounds {
 		in := &s.Inbounds[i]
 		if in.Kind == "" {
@@ -598,8 +625,20 @@ func (s State) Validate() error {
 			if t.FromKeyPriv == "" || t.ToKeyPriv == "" {
 				add("туннель %s: нет ключей WG", t.Name)
 			}
-			if _, _, err := SubnetAddrs(t.Subnet); err != nil {
+			from, to, err := t.Addrs()
+			if err != nil {
 				add("туннель %s: %v", t.Name, err)
+			} else if s.SharedSubnet() != "" {
+				// Общая сеть: оба конца должны быть её адресами и не совпадать
+				// с адресом хаба, клиентами и друг другом.
+				if _, ipnet, err := net.ParseCIDR(s.SharedSubnet()); err == nil {
+					for _, a := range []string{from, to} {
+						ip := net.ParseIP(a)
+						if ip == nil || !ipnet.Contains(ip) {
+							add("туннель %s: адрес %s вне общей сети %s", t.Name, a, s.SharedSubnet())
+						}
+					}
+				}
 			}
 			if t.Mark == 0 {
 				add("туннель %s: mark не задан", t.Name)
@@ -639,6 +678,18 @@ func (s State) Validate() error {
 		}
 		if c.SubToken == "" {
 			add("клиент %s: нет sub_token", c.Email)
+		}
+		if c.Egress != "" && c.Egress != TagDirect {
+			name, ok := strings.CutPrefix(c.Egress, TagTunnel)
+			enabled := false
+			for _, t := range s.Tunnels {
+				if t.Enabled && t.Name == name {
+					enabled = true
+				}
+			}
+			if !ok || name == "" || !enabled {
+				add("клиент %s: личный выход %q — нет включённого туннеля %s", c.Email, c.Egress, name)
+			}
 		}
 		if len(c.Inbounds) == 0 {
 			add("клиент %s: не привязан ни к одному инбаунду", c.Email)

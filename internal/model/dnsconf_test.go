@@ -186,14 +186,19 @@ func TestWireGuardSubnetVsTunnel(t *testing.T) {
 		Listen: "0.0.0.0", Port: 51830, Enabled: true,
 	})
 	st.Clients[0].Inbounds = append(st.Clients[0].Inbounds, "in-wg")
-	st.Tunnels[0].Subnet = "10.88.0.0/30"
+	// Туннель живёт в той же сети, что и клиенты: адреса концов выдаются
+	// из неё и не совпадают с адресом хаба (.1) и клиентами.
 	st.Normalize()
-	if err := st.Validate(); err == nil || !strings.Contains(err.Error(), "пересекается с туннелем") {
-		t.Fatalf("конфликт с туннелем не поймали: %v", err)
-	}
-	st.Tunnels[0].Subnet = "10.77.9.0/30"
 	if err := st.Validate(); err != nil {
-		t.Errorf("разные подсети должны быть валидны: %v", err)
+		t.Fatalf("общая сеть должна быть валидной: %v", err)
+	}
+	if from, to := st.Tunnels[0].FromAddr, st.Tunnels[0].ToAddr; from != "10.88.0.200" || to != "10.88.0.250" {
+		t.Errorf("адреса туннеля в общей сети: from=%q to=%q, ожидались .200/.250", from, to)
+	}
+	// Чужой адрес вне общей сети — ошибка.
+	st.Tunnels[0].ToAddr = "10.77.1.2"
+	if err := st.Validate(); err == nil || !strings.Contains(err.Error(), "вне общей сети") {
+		t.Fatalf("адрес вне общей сети не поймали: %v", err)
 	}
 }
 

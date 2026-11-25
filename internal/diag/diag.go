@@ -330,7 +330,7 @@ func Tunnel(st model.State, tunnelID, host, localNode string, rs Runners) (Repor
 		return vlessCheck(st, t, from, rep)
 	}
 
-	_, toAddr, err := model.SubnetAddrs(t.Subnet)
+	_, toAddr, err := t.Addrs()
 	if err != nil {
 		return rep, err
 	}

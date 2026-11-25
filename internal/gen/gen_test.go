@@ -98,8 +98,8 @@ func TestWGReverseSides(t *testing.T) {
 	for _, want := range []string{
 		"Table = off",
 		"ListenPort = 51820",
-		"Address = 10.77.1.1/30",
-		"PostUp = ip -4 route replace 10.77.1.2/32 dev %i", // маршрут для SSH через туннель
+		"Address = 10.88.0.200/32", // хаб в общей сети
+		"PostUp = ip -4 route replace 10.88.0.250/32 dev %i", // маршрут для SSH через туннель
 		"PostUp = ip rule add fwmark 100 lookup 100",
 		"ip -4 route replace default dev %i table 100",
 		"/proc/sys/net/ipv4/conf/%i/rp_filter",
@@ -118,7 +118,7 @@ func TestWGReverseSides(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, want := range []string{
-		"Address = 10.77.1.2/30",
+		"Address = 10.88.0.250/32", // выход — адрес в общей сети
 		"PersistentKeepalive = 25",
 		"Endpoint = hub.example.com:51820",
 		"ip_forward=1",

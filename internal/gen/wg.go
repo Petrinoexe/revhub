@@ -112,7 +112,7 @@ func Artifacts(st model.State, nodeID string) ([]File, error) {
 		if t.Kind != model.TunnelWG && t.Kind != model.TunnelWGReverse {
 			continue
 		}
-		fromAddr, toAddr, err := model.SubnetAddrs(t.Subnet)
+		fromAddr, toAddr, err := t.Addrs()
 		if err != nil {
 			continue
 		}
@@ -289,17 +289,7 @@ func ClientWGConf(st model.State, in model.Inbound, nodeID string) (string, erro
 		if len(natiface) > 15 {
 			return "", fmt.Errorf("слишком длинное имя интерфейса туннеля %q", natiface)
 		}
-		nat := []string{
-			fmt.Sprintf(`add table ip %s`, table),
-			fmt.Sprintf(`add chain ip %s postrouting { type nat hook postrouting priority 100; }`, table),
-			fmt.Sprintf(`add rule ip %s postrouting ip saddr %s oifname "%s" masquerade`, table, wg.Subnet, natiface),
-		}
-		b.WriteString("PostUp = " + soft("if command -v nft >/dev/null; then printf '%s\\n' "+shellJoin(nat)+
-			" | nft -f -; else iptables -t nat -I POSTROUTING -s "+wg.Subnet+" -o "+natiface+" -j MASQUERADE; fi",
-			"не удалось включить подмену адреса в туннель — выход отбросит клиентские пакеты") + "\n")
-		b.WriteString("PostDown = " + soft("if command -v nft >/dev/null; then nft delete table ip "+table+
-			" 2>/dev/null || true; else iptables -t nat -D POSTROUTING -s "+wg.Subnet+" -o "+natiface+
-			" -j MASQUERADE 2>/dev/null || true; fi", "не удалось снять подмену адреса") + "\n")
+		writeTunnelNAT(&b, wg.Subnet, table, natiface)
 	default:
 		// Общий выход в интернет: NAT наружу, но не между пирами.
 		nat := []string{
@@ -309,6 +299,46 @@ func ClientWGConf(st model.State, in model.Inbound, nodeID string) (string, erro
 		}
 		b.WriteString("PostUp = if command -v nft >/dev/null; then printf '%s\\n' " + shellJoin(nat) + " | nft -f -; else iptables -t nat -I POSTROUTING -s " + wg.Subnet + " ! -o %i -j MASQUERADE; fi\n")
 		b.WriteString("PostDown = if command -v nft >/dev/null; then nft delete table ip " + table + " 2>/dev/null || true; else iptables -t nat -D POSTROUTING -s " + wg.Subnet + " ! -o %i -j MASQUERADE 2>/dev/null || true; fi\n")
+	}
+
+	// Личные выходы пиров: правило по адресу источника с более высоким
+	// приоритетом, чем правило инбаунда (31900 против 32000). Один клиент
+	// может идти в свой выходной узел, пока остальные идут в другой туннель
+	// или напрямую.
+	natTunnels := map[string]bool{}
+	directOverride := false
+	for _, c := range st.Clients {
+		if c.Egress == "" || !c.Enabled || c.Expired() || !contains(c.Inbounds, in.ID) {
+			continue
+		}
+		peer, ok := c.WireGuard[in.ID]
+		if !ok || peer.Address == "" {
+			continue
+		}
+		ip := strings.TrimSuffix(peer.Address, "/32")
+		bucket := "main"
+		if strings.HasPrefix(c.Egress, model.TagTunnel) {
+			name := strings.TrimPrefix(c.Egress, model.TagTunnel)
+			t, ok := findTunnel(st, name)
+			if !ok || t.FromNode != nodeID {
+				return "", fmt.Errorf("клиент %s: нет включённого туннеля %s на узле %s", c.Email, name, nodeID)
+			}
+			bucket = strconv.Itoa(t.Mark)
+			if !natTunnels[bucket] {
+				natTunnels[bucket] = true
+				writeTunnelNAT(&b, wg.Subnet, table, t.WGInterface())
+			}
+		} else if c.Egress == model.TagDirect {
+			if !directOverride {
+				directOverride = true
+				writeDirectNAT(&b, wg.Subnet, table+"_d")
+			}
+		} else {
+			continue
+		}
+		fmt.Fprintf(&b, "PostUp = ip rule del from %s/32 lookup %s pref 31900 2>/dev/null || true; ip rule add from %s/32 lookup %s pref 31900\n",
+			ip, bucket, ip, bucket)
+		fmt.Fprintf(&b, "PostDown = ip rule del from %s/32 lookup %s pref 31900 2>/dev/null || true\n", ip, bucket)
 	}
 
 	peers := 0
@@ -339,6 +369,38 @@ func ClientWGConf(st model.State, in model.Inbound, nodeID string) (string, erro
 		return "", fmt.Errorf("нет ни одного активного клиента WireGuard")
 	}
 	return b.String(), nil
+}
+
+// writeDirectNAT — обычный NAT узла для пира, которому выход переопределён на
+// «напрямую», когда вся сеть уходит в туннель.
+func writeDirectNAT(b *strings.Builder, subnet, table string) {
+	rules := []string{
+		fmt.Sprintf(`add table ip %s`, table),
+		fmt.Sprintf(`add chain ip %s postrouting { type nat hook postrouting priority 100; }`, table),
+		fmt.Sprintf(`add rule ip %s postrouting ip saddr %s oifname != "%%i" masquerade`, table, subnet),
+	}
+	b.WriteString("PostUp = " + soft("if command -v nft >/dev/null; then printf '%s\n' "+shellJoin(rules)+
+		" | nft -f -; else iptables -t nat -I POSTROUTING -s "+subnet+" -j MASQUERADE; fi",
+		"не удалось включить NAT для пира с выходом напрямую") + "\n")
+	b.WriteString("PostDown = " + soft("if command -v nft >/dev/null; then nft delete table ip "+table+
+		" 2>/dev/null || true; else iptables -t nat -D POSTROUTING -s "+subnet+" -j MASQUERADE 2>/dev/null || true; fi",
+		"не удалось снять NAT для пира") + "\n")
+}
+
+// writeTunnelNAT подменяет источник клиентских пакетов на адрес туннеля:
+// выходной узел знает только его (его AllowedIPs), а чужие адреса отбрасывает.
+func writeTunnelNAT(b *strings.Builder, subnet, table, natiface string) {
+	rules := []string{
+		fmt.Sprintf(`add table ip %s`, table),
+		fmt.Sprintf(`add chain ip %s postrouting { type nat hook postrouting priority 100; }`, table),
+		fmt.Sprintf(`add rule ip %s postrouting ip saddr %s oifname "%s" masquerade`, table, subnet, natiface),
+	}
+	b.WriteString("PostUp = " + soft("if command -v nft >/dev/null; then printf '%s\n' "+shellJoin(rules)+
+		" | nft -f -; else iptables -t nat -I POSTROUTING -s "+subnet+" -o "+natiface+" -j MASQUERADE; fi",
+		"не удалось включить подмену адреса в туннель — выход отбросит клиентские пакеты") + "\n")
+	b.WriteString("PostDown = " + soft("if command -v nft >/dev/null; then nft delete table ip "+table+
+		" 2>/dev/null || true; else iptables -t nat -D POSTROUTING -s "+subnet+" -o "+natiface+
+		" -j MASQUERADE 2>/dev/null || true; fi", "не удалось снять подмену адреса") + "\n")
 }
 
 // egressText — человекочитаемое «куда выпускает» для шапки конфига.
@@ -410,7 +472,7 @@ func WGConfig(st model.State, t model.Tunnel, nodeID string) (string, error) {
 	if !t.Touches(nodeID) {
 		return "", fmt.Errorf("узел %q не участвует в туннеле", nodeID)
 	}
-	fromAddr, toAddr, err := model.SubnetAddrs(t.Subnet)
+	fromAddr, toAddr, err := t.Addrs()
 	if err != nil {
 		return "", err
 	}
@@ -420,6 +482,13 @@ func WGConfig(st model.State, t model.Tunnel, nodeID string) (string, error) {
 	addr, otherPub := toAddr, t.FromKeyPub
 	if isFrom {
 		addr, otherPub = fromAddr, t.ToKeyPub
+	}
+	// В общей сети концы туннеля — обычные /32: подсеть уже занята клиентским
+	// интерфейсом, и второй адрес с той же маской сломал бы маршруты. Старые
+	// состояния (отдельная /30) рендерим как раньше.
+	mask := "/30"
+	if t.FromAddr != "" && t.ToAddr != "" {
+		mask = "/32"
 	}
 	private := pick(isFrom, t.FromKeyPriv, t.ToKeyPriv)
 	for _, key := range []string{private, otherPub} {
@@ -433,7 +502,7 @@ func WGConfig(st model.State, t model.Tunnel, nodeID string) (string, error) {
 	fmt.Fprintf(&b, "# revhub: туннель %q, вид %s, узел %s\n", t.Name, t.Kind, nodeID)
 	fmt.Fprintf(&b, "# направление трафика: %s → %s\n", t.FromNode, t.ToNode)
 	b.WriteString("[Interface]\n")
-	fmt.Fprintf(&b, "Address = %s/30\n", addr)
+	fmt.Fprintf(&b, "Address = %s%s\n", addr, mask)
 	fmt.Fprintf(&b, "PrivateKey = %s\n", private)
 	b.WriteString("Table = off\n")
 	fmt.Fprintf(&b, "MTU = %d\n", 1380)
@@ -467,6 +536,11 @@ func WGConfig(st model.State, t model.Tunnel, nodeID string) (string, error) {
 			"rp_filter не сброшен в loose — часть пакетов может фильтроваться") + "\n")
 		fmt.Fprintf(&b, "PostDown = ip rule del fwmark %d lookup %d 2>/dev/null || true\n", t.Mark, t.Mark)
 		fmt.Fprintf(&b, "PostDown = ip -4 route flush table %d 2>/dev/null || true\n", t.Mark)
+	}
+	if !isFrom {
+		// Обратный путь к концу туннеля на хабе: Table = off, маршрут свой.
+		fmt.Fprintf(&b, "PostUp = ip -4 route replace %s/32 dev %%i\n", fromAddr)
+		fmt.Fprintf(&b, "PostDown = ip -4 route del %s/32 dev %%i 2>/dev/null || true\n", fromAddr)
 	}
 	if !isFrom && t.ForwardPolicy {
 		if err := writeNAT(&b, t, fromAddr, egressSubnets(st, t)); err != nil {

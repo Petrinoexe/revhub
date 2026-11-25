@@ -213,8 +213,8 @@ func TestTunnelExitNatCoversClients(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, want := range []string{
-		"ip saddr { 10.77.1.1/32, 10.88.0.0/24 }",
-		"AllowedIPs = 10.77.1.1/32, 10.88.0.0/24",
+		"ip saddr { 10.88.0.200/32, 10.88.0.0/24 }",
+		"AllowedIPs = 10.88.0.200/32, 10.88.0.0/24",
 		"iptables -I FORWARD -i %i -j ACCEPT",
 		"ip -4 route replace 10.88.0.0/24 dev %i",
 	} {
