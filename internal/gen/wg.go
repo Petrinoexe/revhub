@@ -279,6 +279,27 @@ func ClientWGConf(st model.State, in model.Inbound, nodeID string) (string, erro
 		fmt.Fprintf(&b, "PostUp = ip -4 route show table %d default | grep -q . || echo \"[revhub] таблица %d без default: туннель %s не поднят, клиенты пойдут напрямую\" >&2\n",
 			t.Mark, t.Mark, name)
 		fmt.Fprintf(&b, "PostDown = ip rule del iif %%i lookup %d 2>/dev/null || true\n", t.Mark)
+		// Подмена источника на адрес туннеля. Выходной узел — «тупой шлюз»:
+		// он знает только адрес дальнего конца туннеля, и его WireGuard
+		// выбрасывает пакеты с чужими адресами по AllowedIPs. NAT на хабе
+		// делает выход независимым от того, какие клиентские подсети ему
+		// прописали (на контейнерных VPS это частая история), а обратные
+		// пакеты conntrack раскручивает сам.
+		natiface := t.WGInterface()
+		if len(natiface) > 15 {
+			return "", fmt.Errorf("слишком длинное имя интерфейса туннеля %q", natiface)
+		}
+		nat := []string{
+			fmt.Sprintf(`add table ip %s`, table),
+			fmt.Sprintf(`add chain ip %s postrouting { type nat hook postrouting priority 100; }`, table),
+			fmt.Sprintf(`add rule ip %s postrouting ip saddr %s oifname "%s" masquerade`, table, wg.Subnet, natiface),
+		}
+		b.WriteString("PostUp = " + soft("if command -v nft >/dev/null; then printf '%s\\n' "+shellJoin(nat)+
+			" | nft -f -; else iptables -t nat -I POSTROUTING -s "+wg.Subnet+" -o "+natiface+" -j MASQUERADE; fi",
+			"не удалось включить подмену адреса в туннель — выход отбросит клиентские пакеты") + "\n")
+		b.WriteString("PostDown = " + soft("if command -v nft >/dev/null; then nft delete table ip "+table+
+			" 2>/dev/null || true; else iptables -t nat -D POSTROUTING -s "+wg.Subnet+" -o "+natiface+
+			" -j MASQUERADE 2>/dev/null || true; fi", "не удалось снять подмену адреса") + "\n")
 	default:
 		// Общий выход в интернет: NAT наружу, но не между пирами.
 		nat := []string{

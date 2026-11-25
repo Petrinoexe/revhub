@@ -156,8 +156,15 @@ func TestClientWGConfTunnelEgress(t *testing.T) {
 	if !strings.Contains(conf, "ip -4 route replace 10.88.0.0/24 dev %i table 300") {
 		t.Errorf("нет маршрута на клиентскую сеть в таблице туннеля:\n%s", conf)
 	}
-	if strings.Contains(conf, "masquerade") {
-		t.Error("при выходе в туннель NAT делает выходной узел, не хаб")
+	// Хаб подменяет клиентский адрес на адрес туннеля: выход — «тупой шлюз»,
+	// его WireGuard выбрасывает пакеты с чужими источниками по AllowedIPs.
+	// NAT в интернет делает по-прежнему выходной узел.
+	if !strings.Contains(conf, `add rule ip revhub_`) ||
+		!strings.Contains(conf, `ip saddr 10.88.0.0/24 oifname`) {
+		t.Errorf("нет подмены источника при выходе в туннель:\n%s", conf)
+	}
+	if strings.Contains(conf, "oifname != %i masquerade") || strings.Contains(conf, `oifname != "%i" masquerade`) {
+		t.Error("в интернет должен NAT'ить выходной узел, а не хаб")
 	}
 }
 
