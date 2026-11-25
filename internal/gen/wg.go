@@ -256,6 +256,9 @@ func ClientWGConf(st model.State, in model.Inbound, nodeID string) (string, erro
 	// NAT — в своей таблице: там нет чужих правил, и удаление нашего drop-in'а
 	// не задевает остальное.
 	table := nftTable(in.WGInterface())
+	// Уже включённый NAT: правила отдельных пиров не должны дублировать таблицу.
+	natTunnels := map[int]bool{}
+	directOverride := false
 	switch {
 	case strings.HasPrefix(in.Egress, model.TagTunnel):
 		// Клиенты выходят через туннель: маршрут по источнику в его таблицу.
@@ -290,6 +293,7 @@ func ClientWGConf(st model.State, in model.Inbound, nodeID string) (string, erro
 			return "", fmt.Errorf("слишком длинное имя интерфейса туннеля %q", natiface)
 		}
 		writeTunnelNAT(&b, wg.Subnet, table, natiface)
+		natTunnels[t.Mark] = true
 	default:
 		// Общий выход в интернет: NAT наружу, но не между пирами.
 		nat := []string{
@@ -299,14 +303,13 @@ func ClientWGConf(st model.State, in model.Inbound, nodeID string) (string, erro
 		}
 		b.WriteString("PostUp = if command -v nft >/dev/null; then printf '%s\\n' " + shellJoin(nat) + " | nft -f -; else iptables -t nat -I POSTROUTING -s " + wg.Subnet + " ! -o %i -j MASQUERADE; fi\n")
 		b.WriteString("PostDown = if command -v nft >/dev/null; then nft delete table ip " + table + " 2>/dev/null || true; else iptables -t nat -D POSTROUTING -s " + wg.Subnet + " ! -o %i -j MASQUERADE 2>/dev/null || true; fi\n")
+		directOverride = true
 	}
 
 	// Личные выходы пиров: правило по адресу источника с более высоким
 	// приоритетом, чем правило инбаунда (31900 против 32000). Один клиент
 	// может идти в свой выходной узел, пока остальные идут в другой туннель
 	// или напрямую.
-	natTunnels := map[string]bool{}
-	directOverride := false
 	for _, c := range st.Clients {
 		if c.Egress == "" || !c.Enabled || c.Expired() || !contains(c.Inbounds, in.ID) {
 			continue
@@ -324,8 +327,8 @@ func ClientWGConf(st model.State, in model.Inbound, nodeID string) (string, erro
 				return "", fmt.Errorf("клиент %s: нет включённого туннеля %s на узле %s", c.Email, name, nodeID)
 			}
 			bucket = strconv.Itoa(t.Mark)
-			if !natTunnels[bucket] {
-				natTunnels[bucket] = true
+			if !natTunnels[t.Mark] {
+				natTunnels[t.Mark] = true
 				writeTunnelNAT(&b, wg.Subnet, table, t.WGInterface())
 			}
 		} else if c.Egress == model.TagDirect {
@@ -371,6 +374,10 @@ func ClientWGConf(st model.State, in model.Inbound, nodeID string) (string, erro
 	return b.String(), nil
 }
 
+// printfNewline — `printf '%s\n' ` для nft-скрипта. Отдельной raw-строкой,
+// чтобы Go не превратил \n в перевод строки и не разорвал строку конфига.
+const printfNewline = `printf '%s\n' `
+
 // writeDirectNAT — обычный NAT узла для пира, которому выход переопределён на
 // «напрямую», когда вся сеть уходит в туннель.
 func writeDirectNAT(b *strings.Builder, subnet, table string) {
@@ -379,7 +386,9 @@ func writeDirectNAT(b *strings.Builder, subnet, table string) {
 		fmt.Sprintf(`add chain ip %s postrouting { type nat hook postrouting priority 100; }`, table),
 		fmt.Sprintf(`add rule ip %s postrouting ip saddr %s oifname != "%%i" masquerade`, table, subnet),
 	}
-	b.WriteString("PostUp = " + soft("if command -v nft >/dev/null; then printf '%s\n' "+shellJoin(rules)+
+	// printf '%s\n' — raw-строка: в обычной Go-строке \n стал бы переводом
+	// строки, и wg-quick увидел бы обрывок конфига («Line unrecognized»).
+	b.WriteString("PostUp = " + soft("if command -v nft >/dev/null; then "+printfNewline+shellJoin(rules)+
 		" | nft -f -; else iptables -t nat -I POSTROUTING -s "+subnet+" -j MASQUERADE; fi",
 		"не удалось включить NAT для пира с выходом напрямую") + "\n")
 	b.WriteString("PostDown = " + soft("if command -v nft >/dev/null; then nft delete table ip "+table+
@@ -395,7 +404,7 @@ func writeTunnelNAT(b *strings.Builder, subnet, table, natiface string) {
 		fmt.Sprintf(`add chain ip %s postrouting { type nat hook postrouting priority 100; }`, table),
 		fmt.Sprintf(`add rule ip %s postrouting ip saddr %s oifname "%s" masquerade`, table, subnet, natiface),
 	}
-	b.WriteString("PostUp = " + soft("if command -v nft >/dev/null; then printf '%s\n' "+shellJoin(rules)+
+	b.WriteString("PostUp = " + soft("if command -v nft >/dev/null; then "+printfNewline+shellJoin(rules)+
 		" | nft -f -; else iptables -t nat -I POSTROUTING -s "+subnet+" -o "+natiface+" -j MASQUERADE; fi",
 		"не удалось включить подмену адреса в туннель — выход отбросит клиентские пакеты") + "\n")
 	b.WriteString("PostDown = " + soft("if command -v nft >/dev/null; then nft delete table ip "+table+
