@@ -93,6 +93,25 @@ type Report struct {
 	ArtifactsDir string `json:"artifacts_dir,omitempty"`
 }
 
+// panelConfigForInstall — конфиг панели на этапе установки.
+//
+// Где слушать панель, на установке не решается: это настраивается потом в
+// панели или `revhub panel set`. Но если адрес задан на все интерфейсы
+// (0.0.0.0), это осознанный выбор — помечаем панель открытой наружу, иначе
+// валидация справедливо откажется её принимать.
+func panelConfigForInstall(addr string) *model.PanelConfig {
+	p := &model.PanelConfig{Listen: addr}
+	if host, _, err := net.SplitHostPort(addr); err == nil {
+		// Пустой хост (":2096") — тоже все интерфейсы.
+		if host == "" {
+			p.Expose = true
+		} else if ip := net.ParseIP(host); ip != nil && ip.IsUnspecified() {
+			p.Expose = true
+		}
+	}
+	return p
+}
+
 func Defaults() Options {
 	return Options{
 		Prefix: "/usr/local", EtcDir: "/etc/revhub", StateDir: "/var/lib/revhub",
@@ -1407,10 +1426,15 @@ func writeState(o Options, cfg *tlsCfg, rep *Report) (model.State, error) {
 	if st.Routes == nil {
 		st.Routes = []model.Rule{}
 	}
-	st.Panel = &model.PanelConfig{Listen: o.PanelAddr}
+	st.Panel = panelConfigForInstall(o.PanelAddr)
 	st.Normalize()
 	if err := st.Validate(); err != nil {
 		return st, fmt.Errorf("состояние не прошло валидацию: %w", err)
+	}
+	if st.Panel.Expose {
+		rep.Steps = append(rep.Steps, Step{Name: "панель",
+			Detail: "слушает " + st.Panel.Listen + " — помечено как открытая наружу; " +
+				"поменять: revhub panel set <адрес> или вкладка «Панель»"})
 	}
 
 	statePath := filepath.Join(o.EtcDir, "state.json")

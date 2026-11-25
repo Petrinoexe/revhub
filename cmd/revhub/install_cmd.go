@@ -21,7 +21,8 @@ func cmdInstall(args []string) {
 	fs.StringVar(&o.Prefix, "prefix", o.Prefix, "куда ставить бинарь (/usr/local)")
 	fs.StringVar(&o.EtcDir, "etc-dir", o.EtcDir, "конфиги и состояние")
 	fs.StringVar(&o.StateDir, "state-dir", o.StateDir, "артефакты узла")
-	fs.StringVar(&o.PanelAddr, "panel-addr", o.PanelAddr, "адрес панели")
+	fs.StringVar(&o.PanelAddr, "panel-addr", o.PanelAddr,
+		"где слушать панель (по умолчанию только петля); менять потом: revhub panel set <адрес>")
 	fs.BoolVar(&o.PanelTLS, "panel-tls", false, "панель по HTTPS (нужен сертификат: domain или ip)")
 	fs.StringVar(&o.Host, "host", "", "публичный IP или домен узла")
 	fs.StringVar(&o.Mode, "tls", o.Mode, "domain | ip-le | ip | reality | none")

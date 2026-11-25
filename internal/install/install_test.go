@@ -271,6 +271,26 @@ func TestInstallPanelOnlyEmpty(t *testing.T) {
 	}
 }
 
+// Установщик не решает, где слушать панель: адрес задаётся потом в панели или
+// через `revhub panel set`. Но адрес на все интерфейсы не должен валить
+// установку — это осознанное «открыть наружу», значит expose=true.
+func TestPanelConfigForInstall(t *testing.T) {
+	if p := panelConfigForInstall("127.0.0.1:2096"); p.Expose {
+		t.Error("петля не должна помечаться как открытая наружу")
+	}
+	for _, addr := range []string{"0.0.0.0:2096", ":2096"} {
+		if p := panelConfigForInstall(addr); !p.Expose {
+			t.Errorf("%s: адрес на все интерфейсы должен получить expose", addr)
+		}
+	}
+	st := model.Demo()
+	st.Panel = panelConfigForInstall("0.0.0.0:2096")
+	st.Normalize()
+	if err := st.Validate(); err != nil {
+		t.Errorf("состояние с открытой панелью должно проходить валидацию: %v", err)
+	}
+}
+
 func TestPanelURL(t *testing.T) {
 	o := Defaults()
 	if got := panelURL(o); got != "http://127.0.0.1:2096" {
