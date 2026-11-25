@@ -57,6 +57,11 @@ func wireGuardLink(in model.Inbound, endpoint string, c model.Client, peer model
 		"publickey": {in.WireGuard.PublicKey}, "presharedkey": {peer.PresharedKey},
 		"address": {peer.Address}, "mtu": {strconv.Itoa(model.DefaultWireGuardMTU)},
 	}
+	// DNS инбаунда: клиенты, которые его понимают (sing-box/Throne, свежий
+	// v2rayN), резолвят имена внутри туннеля, а не системным резолвером.
+	if dns := strings.TrimSpace(in.WireGuard.DNS); dns != "" {
+		q.Set("dns", dns)
+	}
 	u := url.URL{
 		Host: endpoint, RawQuery: q.Encode(),
 		Fragment: c.Email + "@" + in.Tag,
