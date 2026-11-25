@@ -344,8 +344,8 @@ func Tunnel(st model.State, tunnelID, host, localNode string, rs Runners) (Repor
 	}
 
 	// Пинг по самому туннелю: пакет уходит в интерфейс, ответ приходит обратно.
-	rep.Items = append(rep.Items, pingItem(from, "пинг дальнего конца по туннелю",
-		fmt.Sprintf("ping -c 3 -W 2 -I %s %s", iface, toAddr), "туннель не пропускает даже ICMP между концами"))
+	peer := pingItem(from, "пинг дальнего конца по туннелю",
+		fmt.Sprintf("ping -c 3 -W 2 -I %s %s", iface, toAddr), "туннель не пропускает даже ICMP между концами")
 
 	// Пинг «в мир» через выходной узел: проверяет NAT и forwarding на To.
 	target := strings.TrimSpace(host)
@@ -355,9 +355,18 @@ func Tunnel(st model.State, tunnelID, host, localNode string, rs Runners) (Repor
 	if net.ParseIP(target) == nil && strings.Contains(target, "/") {
 		target = "1.1.1.1"
 	}
-	rep.Items = append(rep.Items, pingItem(from, "пинг "+target+" через выходной узел",
+	world := pingItem(from, "пинг "+target+" через выходной узел",
 		fmt.Sprintf("ping -c 3 -W 2 -I %s %s", iface, target),
-		"туннель жив, но выходной узел не выпускает трафик: проверь NAT и ip_forward на нём"))
+		"туннель жив, но выходной узел не выпускает трафик: проверь NAT и ip_forward на нём")
+	// Если «в мир» через туннель проходит, а адрес второго конца не отвечает —
+	// это не поломка туннеля, а рассинхрон адресов: на выходном узле ещё
+	// старый конфиг, и пакет, адресованный ему самому, там некому принять.
+	if !peer.OK && world.OK {
+		peer = warn(peer.Name, peer.Out+"\n(трафик через туннель при этом проходит: "+target+" ответил)",
+			"адрес "+toAddr+" на выходном узле не настроен: примените конфигурацию на нём (там сейчас другой адрес туннеля)")
+		peer.Cmd = fmt.Sprintf("ping -c 3 -W 2 -I %s %s", iface, toAddr)
+	}
+	rep.Items = append(rep.Items, peer, world)
 	return rep, nil
 }
 
