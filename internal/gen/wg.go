@@ -641,14 +641,24 @@ done
 if [ -n "$addr" ]; then
   busy=$(ip -4 -o addr show 2>/dev/null | awk -v a="$addr" '$4 == a {print $2; exit}')
   if [ -n "$busy" ] && [ "$busy" != %[2]q ]; then
-    echo "[revhub] адрес $addr (конфиг %[1]q) уже занят интерфейсом $busy" >&2
+    echo "[revhub] адрес $addr (конфиг '%[1]s') уже занят интерфейсом $busy" >&2
     echo "[revhub] сними его: ip link del $busy — или задай инбаунду другую подсеть" >&2
     exit 1
   fi
 fi
 `, f, name)
-		fmt.Fprintf(&b, "if ! cmp -s %q /etc/wireguard/%q || ! ip link show dev %q >/dev/null 2>&1; then\n  if ip link show dev %q >/dev/null 2>&1; then wg-quick down %q; fi\n  install -m 600 %q /etc/wireguard/%q\n  wg-quick up %q\nfi\n",
-			f, f, name, name, name, f, f, name)
+		// wg-quick down может не снять интерфейс (нет секции PostDown, битый
+		// файл): тогда up упадёт на «Address already in use». После down
+		// проверяем и добиваем интерфейс руками.
+		fmt.Fprintf(&b, "if ! cmp -s %q /etc/wireguard/%q || ! ip link show dev %q >/dev/null 2>&1; then\n"+
+			"  if ip link show dev %q >/dev/null 2>&1; then\n"+
+			"    wg-quick down %q >/dev/null 2>&1 || true\n"+
+			"    if ip link show dev %q >/dev/null 2>&1; then ip link delete dev %q 2>/dev/null || true; fi\n"+
+			"  fi\n"+
+			"  install -m 600 %q /etc/wireguard/%q\n"+
+			"  wg-quick up %q\n"+
+			"fi\n",
+			f, f, name, name, name, name, name, f, f, name)
 		// Интерфейс должен подниматься после перезагрузки: apply.sh запускается
 		// один раз, а systemd поднимет wg-quick@<имя> сам.
 		fmt.Fprintf(&b, "if [ -d /run/systemd/system ]; then systemctl enable %q >/dev/null 2>&1 || true; fi\n",
