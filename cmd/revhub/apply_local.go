@@ -33,7 +33,14 @@ func cmdApplyLocal(args []string) {
 	if err != nil {
 		log.Fatalf("состояние: %v", err)
 	}
-	files, err := gen.Artifacts(st.Snapshot(), *node)
+	// Проверяем модель до того, как трогать сеть: иначе конфликт подсетей
+	// вылезает из wg-quick как «RTNETLINK answers: Address already in use»
+	// после создания интерфейса, и причина не видна.
+	stst := st.Snapshot()
+	if err := stst.Validate(); err != nil {
+		log.Fatalf("состояние не прошло проверку, применять не буду:\n%v", err)
+	}
+	files, err := gen.Artifacts(stst, *node)
 	if err != nil {
 		log.Fatalf("артефакты узла %s: %v", *node, err)
 	}

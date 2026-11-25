@@ -619,10 +619,34 @@ for stale in /etc/wireguard/*.conf; do
   rm -f -- "$stale"
   echo "[revhub] снят устаревший интерфейс $(basename "$stale" .conf)"
 done
+# Интерфейс мог остаться без конфига: переименовали тег, файл снесли руками.
+# Префикс wgc- наш, такие снимаем по имени, а не по наличию файла.
+keep_ifaces=""
+for f in $keep; do keep_ifaces="$keep_ifaces ${f%.conf}"; done
+for iface in $(ls /sys/class/net 2>/dev/null | grep '^wgc-' || true); do
+  case "$keep_ifaces " in *" $iface "*) continue;; esac
+  wg-quick down "$iface" >/dev/null 2>&1 || true
+  ip link show dev "$iface" >/dev/null 2>&1 && ip link delete dev "$iface" >/dev/null 2>&1 || true
+  echo "[revhub] снят устаревший интерфейс $iface"
+done
 `)
 	}
 	for _, f := range wgFiles {
 		name := strings.TrimSuffix(f, ".conf")
+		// Адрес интерфейса не должен быть занят чужим устройством: wg-quick
+		// успевает создать интерфейс и падает уже на «ip address add» с
+		// «RTNETLINK answers: Address already in use». Проверяем заранее и
+		// говорим, кто занял адрес, — иначе это выглядит как баг панели.
+		fmt.Fprintf(&b, `addr=$(sed -n 's/^Address = //p' %[1]q | head -n1)
+if [ -n "$addr" ]; then
+  busy=$(ip -4 -o addr show 2>/dev/null | awk -v a="$addr" '$4 == a {print $2; exit}')
+  if [ -n "$busy" ] && [ "$busy" != %[2]q ]; then
+    echo "[revhub] адрес $addr (конфиг %[1]q) уже занят интерфейсом $busy" >&2
+    echo "[revhub] сними его: ip link del $busy — или задай инбаунду другую подсеть" >&2
+    exit 1
+  fi
+fi
+`, f, name)
 		fmt.Fprintf(&b, "if ! cmp -s %q /etc/wireguard/%q || ! ip link show dev %q >/dev/null 2>&1; then\n  if ip link show dev %q >/dev/null 2>&1; then wg-quick down %q; fi\n  install -m 600 %q /etc/wireguard/%q\n  wg-quick up %q\nfi\n",
 			f, f, name, name, name, f, f, name)
 		// Интерфейс должен подниматься после перезагрузки: apply.sh запускается

@@ -54,6 +54,32 @@ func TestClientWGConfDirectEgress(t *testing.T) {
 	}
 }
 
+// apply.sh должен заранее сказать, что адрес занят, и снимать наши
+// интерфейсы, оставшиеся без конфига (переименовали тег).
+func TestApplyScriptChecksBusyAddress(t *testing.T) {
+	st := clientNetState()
+	iface := st.Inbounds[0].WGInterface()
+	files, err := Artifacts(st, "hub")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var script string
+	for _, f := range files {
+		if f.Name == "apply.sh" {
+			script = f.Content
+		}
+	}
+	if !strings.Contains(script, "уже занят интерфейсом") {
+		t.Error("нет предварительной проверки занятого адреса")
+	}
+	if !strings.Contains(script, "grep '^wgc-'") {
+		t.Error("нет снятия наших интерфейсов без конфига")
+	}
+	if !strings.Contains(script, iface) {
+		t.Errorf("скрипт не упоминает интерфейс %s", iface)
+	}
+}
+
 // Только включённые клиенты; без них интерфейс не поднимается.
 func TestClientWGConfSkipsInactive(t *testing.T) {
 	st := clientNetState()

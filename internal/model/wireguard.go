@@ -263,6 +263,21 @@ func (s State) validateWireGuard(in Inbound, add func(string, ...any)) {
 			}
 		}
 	}
+	// Та же подсеть у туннеля на этом узле — тоже конфликт адресов: его конец
+	// возьмёт .1, и наш интерфейс упадёт на «Address already in use».
+	for _, t := range s.Tunnels {
+		if !t.Enabled || !t.Touches(in.NodeID) {
+			continue
+		}
+		q, err := netip.ParsePrefix(t.Subnet)
+		if err != nil {
+			continue
+		}
+		if p.Overlaps(q) {
+			add("инбаунд %s: подсеть %s пересекается с туннелем %s (%s) на узле %s",
+				in.Tag, wg.Subnet, t.Name, t.Subnet, in.NodeID)
+		}
+	}
 	if err := validateEgress(s, in); err != nil {
 		add("инбаунд %s: %v", in.Tag, err)
 	}

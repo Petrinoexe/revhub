@@ -177,6 +177,26 @@ func TestAssignWireGuardSubnets(t *testing.T) {
 	}
 }
 
+// Подсеть инбаунда не должна совпадать с подсетью туннеля на том же узле:
+// иначе оба интерфейса хотят один и тот же .1 и второй падает на старте.
+func TestWireGuardSubnetVsTunnel(t *testing.T) {
+	st := Demo() // туннель с ключами и меткой уже есть
+	st.Inbounds = append(st.Inbounds, Inbound{
+		ID: "in-wg", NodeID: "hub", Tag: "wg", Kind: InboundWireGuard,
+		Listen: "0.0.0.0", Port: 51830, Enabled: true,
+	})
+	st.Clients[0].Inbounds = append(st.Clients[0].Inbounds, "in-wg")
+	st.Tunnels[0].Subnet = "10.88.0.0/30"
+	st.Normalize()
+	if err := st.Validate(); err == nil || !strings.Contains(err.Error(), "пересекается с туннелем") {
+		t.Fatalf("конфликт с туннелем не поймали: %v", err)
+	}
+	st.Tunnels[0].Subnet = "10.77.9.0/30"
+	if err := st.Validate(); err != nil {
+		t.Errorf("разные подсети должны быть валидны: %v", err)
+	}
+}
+
 func TestWireGuardEgress(t *testing.T) {
 	st := Demo()
 	st.Inbounds = append(st.Inbounds, Inbound{

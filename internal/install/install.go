@@ -491,6 +491,12 @@ func readState(statePath string) (model.State, error) {
 	if err := json.Unmarshal(b, &st); err != nil {
 		return model.State{}, fmt.Errorf("состояние %s: %w", statePath, err)
 	}
+	st.Normalize()
+	// Подсети и порты проверяем до рендера: иначе конфликт вылезет из wg-quick
+	// как «Address already in use» и будет выглядеть багом панели.
+	if err := st.Validate(); err != nil {
+		return model.State{}, fmt.Errorf("состояние не прошло проверку: %w", err)
+	}
 	return st, nil
 }
 
