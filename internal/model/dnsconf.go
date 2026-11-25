@@ -28,6 +28,12 @@ const (
 // PanelConfig — где панель слушает HTTP(S). Пустая строка = только loopback.
 type PanelConfig struct {
 	Listen string `json:"listen"` // host:port
+	// NodeID — узел, на котором слушает панель. Нужен только чтобы открыть
+	// порт в firewall именно там (apply собирает порты по узлам).
+	NodeID string `json:"node_id"`
+	// Expose — осознанное «панель доступна из интернета»: разрешает 0.0.0.0 и
+	// внешние адреса. Без него панель держится на петле или внутри WireGuard.
+	Expose bool `json:"expose"`
 }
 
 const DefaultPanelListen = "127.0.0.1:2096"
@@ -95,6 +101,21 @@ func dnsPanelLabel(d DNSConfig) string {
 		return d.Panel
 	}
 	return DefaultDNSPanel
+}
+
+// WireGuardAddrs — адреса серверов включённых WG-инбаундов узла: единственные
+// адреса, кроме петли, которые панель может занять, не открываясь наружу.
+func (s State) WireGuardAddrs(nodeID string) []string {
+	var out []string
+	for _, in := range s.Inbounds {
+		if !in.Enabled || in.Kind != InboundWireGuard || in.NodeID != nodeID || in.WireGuard == nil {
+			continue
+		}
+		if addr := in.WireGuard.ServerAddress(); addr != "" {
+			out = append(out, addr)
+		}
+	}
+	return out
 }
 
 // clientLabel — метка имени клиента в зоне: hostname, иначе начало email.
@@ -174,6 +195,9 @@ func (s *State) normalizeDNS() {
 	}
 	if s.Panel.Listen == "" {
 		s.Panel.Listen = DefaultPanelListen
+	}
+	if s.Panel.NodeID == "" && len(s.Nodes) > 0 {
+		s.Panel.NodeID = s.Nodes[0].ID
 	}
 	if s.DNS == nil {
 		return
@@ -299,6 +323,24 @@ func ResolverAddr(s string) (string, error) {
 	return net.JoinHostPort(host, port), nil
 }
 
+// Port — TCP-порт панели (2096, если в адресе мусор).
+func (p *PanelConfig) Port() int {
+	_, port, err := net.SplitHostPort(p.Addr())
+	if err != nil {
+		return 2096
+	}
+	n, err := strconv.Atoi(port)
+	if err != nil || n <= 0 || n > 65535 {
+		return 2096
+	}
+	return n
+}
+
+// Exposed — панель слушает не только петлю.
+func (p *PanelConfig) Exposed() bool {
+	return p != nil && !p.LoopbackOnly()
+}
+
 // Addr — nil-безопасно: состояние из старого файла может не иметь блока panel.
 func (p *PanelConfig) Addr() string {
 	if p == nil || p.Listen == "" {
@@ -328,25 +370,55 @@ func (s State) validatePanel(add func(string, ...any)) {
 	if p, err := strconv.Atoi(port); err != nil || p <= 0 || p > 65535 {
 		add("панель: некорректный порт %q", port)
 	}
-	if addr, err := netip.ParseAddr(host); err == nil && addr.IsLoopback() {
+	if s.Panel.NodeID != "" {
+		found := false
+		for _, n := range s.Nodes {
+			if n.ID == s.Panel.NodeID {
+				found = true
+				break
+			}
+		}
+		if !found {
+			add("панель: узел %q не найден", s.Panel.NodeID)
+		}
+	}
+
+	addr, ipErr := netip.ParseAddr(host)
+	if ipErr == nil && addr.IsLoopback() {
+		if s.Panel.Expose {
+			add("панель: expose=true, но адрес %s — только петля (убери expose или задай адрес)", host)
+		}
 		return // loopback — законный режим (доступ через SSH-туннель)
 	}
-	if _, err := netip.ParseAddr(host); err != nil {
+	if ipErr != nil {
 		return // имя хоста: привязка к интерфейсу проверяется при запуске
 	}
-	found := false
+
+	if addr.IsUnspecified() {
+		if !s.Panel.Expose {
+			add("панель: адрес %s слушает все интерфейсы, то есть открыт наружу — "+
+				"поставь panel.expose=true (вкладка «Панель» или revhub panel expose)", host)
+		}
+		return
+	}
+
+	onWireGuard := false
 	for _, in := range s.Inbounds {
 		if in.Kind != InboundWireGuard || in.WireGuard == nil || !in.Enabled {
 			continue
 		}
-		if p, ok := wireGuardSubnet(in.WireGuard.Subnet); ok && p.Contains(netip.MustParseAddr(host)) &&
-			host == in.WireGuard.ServerAddress() {
-			found = true
+		if host == in.WireGuard.ServerAddress() {
+			onWireGuard = true
 			break
 		}
 	}
-	if !found {
-		add("панель: адрес %q не принадлежит ни одному WireGuard-интерфейсу узла — снаружи панель не откроется", host)
+	if onWireGuard && s.Panel.Expose {
+		add("панель: адрес %s — внутри WireGuard, expose для него не нужен", host)
+		return
+	}
+	if !onWireGuard && !s.Panel.Expose {
+		add("панель: адрес %q не принадлежит ни одному WireGuard-интерфейсу узла — "+
+			"чтобы открыть её наружу, поставь panel.expose=true", host)
 	}
 }
 

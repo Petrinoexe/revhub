@@ -111,6 +111,46 @@ func TestPanelListen(t *testing.T) {
 	}
 }
 
+// expose — осознанный флаг: без него 0.0.0.0 и публичный адрес запрещены,
+// с ним панель открывается наружу.
+func TestPanelExpose(t *testing.T) {
+	st := dnsTestState()
+	st.Panel = &PanelConfig{Listen: "0.0.0.0:2096", NodeID: "hub"}
+	st.Normalize()
+	if err := st.Validate(); err == nil || !strings.Contains(err.Error(), "expose") {
+		t.Fatalf("0.0.0.0 без expose должен ломать валидацию: %v", err)
+	}
+	st.Panel.Expose = true
+	if err := st.Validate(); err != nil {
+		t.Fatalf("0.0.0.0 с expose должен приниматься: %v", err)
+	}
+	st.Panel.Expose = false
+	st.Panel.Listen = "203.0.113.7:2096"
+	if err := st.Validate(); err == nil {
+		t.Fatal("публичный адрес без expose должен ломать валидацию")
+	}
+	st.Panel.Expose = true
+	if err := st.Validate(); err != nil {
+		t.Fatalf("публичный адрес с expose должен приниматься: %v", err)
+	}
+	st.Panel.Listen = "127.0.0.1:2096"
+	if err := st.Validate(); err == nil {
+		t.Fatal("expose с петлёй — противоречие, должно ломаться")
+	}
+	st.Panel.Expose = false
+	st.Panel.Listen = "10.88.0.1:2096"
+	if err := st.Validate(); err != nil {
+		t.Fatalf("адрес WG без expose должен приниматься: %v", err)
+	}
+	st.Panel.Expose = true
+	if err := st.Validate(); err == nil || !strings.Contains(err.Error(), "expose") {
+		t.Fatalf("expose на адресе WG — лишний флаг, должно ломаться: %v", err)
+	}
+	if got := (&PanelConfig{Listen: "0.0.0.0:8443"}).Port(); got != 8443 {
+		t.Errorf("Port() = %d", got)
+	}
+}
+
 func TestAssignWireGuardSubnets(t *testing.T) {
 	st := State{
 		Nodes: []Node{{ID: "hub", PublicAddr: "vpn.example.com"}},

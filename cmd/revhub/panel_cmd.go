@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/netip"
 	"os"
 	"os/exec"
 	"sort"
@@ -74,6 +75,10 @@ func cmdPanel(args []string) {
 		panelSet(statePath, localNode, rest[0], portFlag, restart, dry)
 	case "localhost", "loopback":
 		panelSet(statePath, localNode, "localhost", portFlag, restart, dry)
+	case "expose", "internet", "public":
+		panelSet(statePath, localNode, "internet", portFlag, restart, dry)
+	case "hide", "off":
+		panelSet(statePath, localNode, "localhost", portFlag, restart, dry)
 	case "wg":
 		target := "wg"
 		if len(rest) == 1 {
@@ -83,7 +88,7 @@ func cmdPanel(args []string) {
 		}
 		panelSet(statePath, localNode, target, portFlag, restart, dry)
 	default:
-		die("panel: неизвестная команда %q\n  revhub panel [show|list] | set <адрес> | localhost | wg [тег]", cmd)
+		die("panel: неизвестная команда %q\n  revhub panel [show|list] | set <адрес> | localhost | wg [тег] | expose | hide", cmd)
 	}
 }
 
@@ -103,9 +108,12 @@ func panelShow(w io.Writer, statePath, localNode string) {
 	}
 	state := st.Snapshot()
 	fmt.Fprintf(w, "панель слушает: %s\n", state.Panel.Addr())
-	if state.Panel.LoopbackOnly() {
+	switch {
+	case state.Panel.LoopbackOnly():
 		fmt.Fprintln(w, "  только с этой машины (или через ssh-туннель)")
-	} else {
+	case state.Panel != nil && state.Panel.Expose:
+		fmt.Fprintln(w, "  доступна из интернета (порт открывается apply'ем); TLS:", panelTLSText())
+	default:
 		fmt.Fprintln(w, "  из сети WireGuard, из интернета недоступно")
 	}
 	fmt.Fprintf(w, "юнит: %s\n", panelUnitState())
@@ -146,6 +154,9 @@ func panelChoices(st model.State, localNode string) []panelChoice {
 	out := []panelChoice{{
 		addr:  net.JoinHostPort("127.0.0.1", port),
 		label: "только эта машина",
+	}, {
+		addr:  net.JoinHostPort("0.0.0.0", port),
+		label: "из интернета (все интерфейсы)",
 	}}
 	for _, in := range st.Inbounds {
 		if !in.Enabled || in.Kind != model.InboundWireGuard || in.NodeID != localNode || in.WireGuard == nil {
@@ -190,6 +201,8 @@ func resolvePanelAddr(st model.State, localNode, target string, currentPort int)
 	switch {
 	case lower == "localhost" || lower == "loopback" || lower == "127.0.0.1":
 		return net.JoinHostPort("127.0.0.1", port), nil
+	case lower == "internet" || lower == "public" || lower == "all":
+		return net.JoinHostPort("0.0.0.0", port), nil
 	case lower == "wg" || strings.HasPrefix(lower, "wg:"):
 		tag := strings.TrimPrefix(lower, "wg:")
 		tag = strings.TrimPrefix(tag, ":")
@@ -253,6 +266,12 @@ func panelSet(statePath, localNode, target string, portFlag int, restart, dry bo
 	if err != nil {
 		die("%v", err)
 	}
+	// expose = «панель торчит наружу». Ставим его сами: адрес 0.0.0.0 или чужой
+	// IP — это и есть осознанное решение, а валидация без флага их не пропустит.
+	expose := panelExposeFor(state, localNode, addr)
+	if expose && panTLS() == "" {
+		fmt.Println("внимание: панель без TLS — пароль пойдёт по сети открытым текстом")
+	}
 	if addr == state.Panel.Addr() {
 		fmt.Printf("панель уже слушает %s — ничего не меняю\n", addr)
 		return
@@ -284,7 +303,11 @@ func panelSet(statePath, localNode, target string, portFlag int, restart, dry bo
 	}
 
 	if err := st.Patch(func(s *model.State) error {
-		s.Panel = &model.PanelConfig{Listen: addr}
+		node := ""
+		if s.Panel != nil {
+			node = s.Panel.NodeID
+		}
+		s.Panel = &model.PanelConfig{Listen: addr, NodeID: node, Expose: expose}
 		return nil
 	}); err != nil {
 		if stopped {
@@ -293,6 +316,9 @@ func panelSet(statePath, localNode, target string, portFlag int, restart, dry bo
 		die("не сохранилось: %v", err)
 	}
 	fmt.Printf("адрес панели: %s → %s\n", state.Panel.Addr(), addr)
+	if expose {
+		fmt.Println("панель открыта наружу: apply откроет TCP-порт в ufw/firewalld (если он активен)")
+	}
 
 	if !stopped {
 		fmt.Println("юнит revhub не запущен — запусти его сам: systemctl start revhub")
@@ -303,6 +329,82 @@ func panelSet(statePath, localNode, target string, portFlag int, restart, dry bo
 			err, strings.TrimSpace(string(out)))
 	}
 	fmt.Printf("панель перезапущена: %s\n", addr)
+}
+
+// panelExposeFor — «этот адрес торчит наружу?». Петля и адрес WG-интерфейса
+// панель снаружи не открывают, всё прочее (0.0.0.0, публичный IP, имя хоста) —
+// это и есть осознанное решение, поэтому флаг ставится сам.
+func panelExposeFor(st model.State, localNode, addr string) bool {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return false
+	}
+	return !isLoopbackHost(host) && !isPanelWGAddr(st, localNode, host)
+}
+
+func isLoopbackHost(host string) bool {
+	if host == "localhost" {
+		return true
+	}
+	addr, err := netip.ParseAddr(strings.Trim(host, "[]"))
+	return err == nil && addr.IsLoopback()
+}
+
+// isPanelWGAddr — адрес сервера WireGuard-инбаунда этого узла: на нём панель
+// доступна только из VPN, наружу её это не открывает.
+func isPanelWGAddr(st model.State, localNode, host string) bool {
+	for _, addr := range st.WireGuardAddrs(localNode) {
+		if addr == host {
+			return true
+		}
+	}
+	return false
+}
+
+// panelUnitPath — где искать юнит: так CLI узнаёт, включён ли TLS панели.
+func panelUnitPath() string {
+	candidates := []string{
+		"/etc/systemd/system/revhub.service",
+		"/lib/systemd/system/revhub.service",
+		"/usr/lib/systemd/system/revhub.service",
+	}
+	for _, p := range candidates {
+		if _, err := os.Stat(p); err == nil {
+			return p
+		}
+	}
+	return ""
+}
+
+// panTLS возвращает строку --tls-cert из юнита ("" — панель работает без TLS).
+func panTLS() string {
+	path := panelUnitPath()
+	if path == "" {
+		return ""
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	for _, line := range strings.Split(string(b), "\n") {
+		if !strings.HasPrefix(strings.TrimSpace(line), "ExecStart=") {
+			continue
+		}
+		fields := strings.Fields(line)
+		for i, f := range fields {
+			if f == "--tls-cert" && i+1 < len(fields) {
+				return fields[i+1]
+			}
+		}
+	}
+	return ""
+}
+
+func panelTLSText() string {
+	if cert := panTLS(); cert != "" {
+		return "да (" + cert + ")"
+	}
+	return "НЕТ: пароль уйдёт открытым текстом — переустанови панель с --panel-tls"
 }
 
 // die печатает ошибку и выходит: CLI не должен молчать о том, что не сделал.

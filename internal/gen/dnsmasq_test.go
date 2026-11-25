@@ -121,6 +121,23 @@ func TestDNSArtifactsReachApplyScript(t *testing.T) {
 	}
 }
 
+// Открытая наружу панель должна попасть в порты узла: apply открывает их в
+// ufw/firewalld, иначе снаружи просто ничего не отвечает.
+func TestNodePortsIncludeExposedPanel(t *testing.T) {
+	st := dnsState()
+	st.Panel = &model.PanelConfig{Listen: "0.0.0.0:2096", NodeID: "hub", Expose: true}
+	if got := NodePorts(st, "hub"); !contains(got, "2096/tcp") {
+		t.Errorf("порт панели не попал в список: %v", got)
+	}
+	if got := NodePorts(st, "exit"); contains(got, "2096/tcp") {
+		t.Errorf("на чужом узле порт панели не нужен: %v", got)
+	}
+	st.Panel = &model.PanelConfig{Listen: "10.88.0.1:2096", NodeID: "hub"}
+	if got := NodePorts(st, "hub"); contains(got, "2096/tcp") {
+		t.Errorf("панель внутри WG не требует открытого порта: %v", got)
+	}
+}
+
 func TestDNSMasqBadZone(t *testing.T) {
 	st := dnsState()
 	st.DNS.Root = "not a zone"

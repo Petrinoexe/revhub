@@ -177,7 +177,12 @@ func (s *Server) me(w http.ResponseWriter, r *http.Request) {
 	if s.Auth != nil {
 		user = s.Auth.User
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"user": user, "noauth": s.NoAuth, "local_node": s.LocalNode, "panel_tls": s.hasPanelTLS()})
+	st := s.Store.Snapshot()
+	writeJSON(w, http.StatusOK, map[string]any{
+		"user": user, "noauth": s.NoAuth, "local_node": s.LocalNode, "panel_tls": s.hasPanelTLS(),
+		"panel_addr": st.Panel.Addr(), "panel_expose": st.Panel != nil && st.Panel.Expose,
+		"panel_node": st.Panel.NodeID,
+	})
 }
 
 func clientIP(r *http.Request) string {

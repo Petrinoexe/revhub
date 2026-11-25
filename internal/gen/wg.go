@@ -164,6 +164,11 @@ func NodePorts(st model.State, nodeID string) []string {
 		}
 		add(in.Port, proto)
 	}
+	// Панель, открытая наружу, тоже должна быть в списке портов: иначе ufw
+	// останется закрытым и «снаружи не открывается» будет выглядеть как баг.
+	if st.Panel != nil && st.Panel.Expose && !st.Panel.LoopbackOnly() && st.Panel.NodeID == nodeID {
+		add(st.Panel.Port(), "tcp")
+	}
 	for _, t := range st.Tunnels {
 		if !t.Enabled || !t.Touches(nodeID) {
 			continue

@@ -889,13 +889,31 @@ function renderPanel(v){
       <div class="f wide"><label>Адрес прослушивания</label><input value="${esc(p.listen)}" onchange="ST.panel.listen=this.value.trim()"></div>
     </div>
     <div class="row">
-      ${addrs.map(a=>`<button class="b" onclick="ST.panel.listen='${esc(a+':'+port)}';render()">из WG: ${esc(a)}</button>`).join('')}
-      <button class="b" onclick="ST.panel.listen='127.0.0.1:${esc(port)}';render()">только localhost</button>
+      <label class="mut" style="display:flex;gap:6px;align-items:center">
+        <input type="checkbox" ${p.expose?'checked':''} onchange="toggleExpose(this.checked)">
+        доступна из интернета (0.0.0.0)
+      </label>
+    </div>
+    <div class="row">
+      ${addrs.map(a=>`<button class="b" onclick="ST.panel.listen='${esc(a+':'+port)}';ST.panel.expose=false;render()">из WG: ${esc(a)}</button>`).join('')}
+      <button class="b" onclick="ST.panel.listen='127.0.0.1:${esc(port)}';ST.panel.expose=false;render()">только localhost</button>
       <button class="b p" onclick="save()">Сохранить</button>
       <button class="b" onclick="restartPanel()">Перезапустить панель</button>
     </div>
+    ${(p.expose || !isLoopbackAddr(p.listen)) && !PANEL_TLS ? `<div class="hint" style="color:var(--warn)">TLS у панели не включён: пароль пойдёт открытым текстом. Переустанови панель с --panel-tls или держи её внутри WireGuard.</div>` : ''}
     <div class="hint" id="panel-state">сейчас открыто по ${esc(location.host)} · ${PANEL_TLS?'https':'http'}</div>
   </div></div>`;
+}
+function isLoopbackAddr(addr){
+  const host = String(addr||'').split(':')[0];
+  return host==='127.0.0.1' || host==='localhost' || host==='::1';
+}
+function toggleExpose(on){
+  ST.panel = ST.panel || {listen:'127.0.0.1:2096'};
+  const port = (String(ST.panel.listen).split(':').pop()||'2096');
+  ST.panel.expose = !!on;
+  ST.panel.listen = on ? '0.0.0.0:'+port : '127.0.0.1:'+port;
+  render();
 }
 async function restartPanel(){
   const state = document.getElementById('panel-state');

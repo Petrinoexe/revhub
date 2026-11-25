@@ -42,6 +42,9 @@ func TestResolvePanelAddr(t *testing.T) {
 		{"10.88.0.1:8443", "10.88.0.1:8443"},
 		{"panel.example.com", "panel.example.com:2096"},
 		{" panel.example.com:9000 ", "panel.example.com:9000"},
+		{"internet", "0.0.0.0:2096"},
+		{"public", "0.0.0.0:2096"},
+		{"0.0.0.0", "0.0.0.0:2096"},
 	}
 	for _, c := range cases {
 		got, err := resolvePanelAddr(st, "node-1", c.target, 2096)
@@ -82,10 +85,28 @@ func TestResolvePanelAddrErrors(t *testing.T) {
 	}
 }
 
+// expose ставится по адресу: петля и WG — нет, всё остальное — да.
+func TestPanelExposeFor(t *testing.T) {
+	st := panelState()
+	cases := map[string]bool{
+		"127.0.0.1:2096":        false,
+		"10.88.0.1:2096":        false,
+		"10.88.1.1:2096":        false,
+		"0.0.0.0:2096":          true,
+		"203.0.113.7:2096":      true,
+		"panel.example.com:443": true,
+	}
+	for addr, want := range cases {
+		if got := panelExposeFor(st, "node-1", addr); got != want {
+			t.Errorf("%s: expose=%v, ожидалось %v", addr, got, want)
+		}
+	}
+}
+
 func TestPanelChoices(t *testing.T) {
 	st := panelState()
 	choices := panelChoices(st, "node-1")
-	if len(choices) != 3 { // loopback + два WG-инбаунда
+	if len(choices) != 4 { // loopback + интернет + два WG-инбаунда
 		t.Fatalf("ожидалось 3 варианта, получено %d: %+v", len(choices), choices)
 	}
 	byAddr := map[string]panelChoice{}
@@ -99,7 +120,7 @@ func TestPanelChoices(t *testing.T) {
 		t.Errorf("вариант второго инбаунда неверный: %+v", c)
 	}
 	// чужой узел: только loopback
-	if got := panelChoices(st, "other"); len(got) != 1 {
+	if got := panelChoices(st, "other"); len(got) != 2 {
 		t.Errorf("для чужого узла ожидался только loopback: %+v", got)
 	}
 }
