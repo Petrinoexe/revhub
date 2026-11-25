@@ -84,6 +84,35 @@ func TestApplyScriptChecksBusyAddress(t *testing.T) {
 	}
 }
 
+// Xray должен перезапуститься ДО подъёма WG: старая конфигурация может
+// держать UDP-порт клиентского инбаунда, и тогда `ip link set up` падает.
+func TestXrayRestartsBeforeWireGuard(t *testing.T) {
+	st := clientNetState()
+	st.Inbounds = append(st.Inbounds, model.Inbound{
+		ID: "in-vless", NodeID: "hub", Tag: "vless", Kind: model.InboundVLESS,
+		Listen: "0.0.0.0", Port: 443, Enabled: true, Security: "none",
+	})
+	st.Clients[0].Inbounds = append(st.Clients[0].Inbounds, "in-vless")
+	files, err := Artifacts(st, "hub")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var script string
+	for _, f := range files {
+		if f.Name == "apply.sh" {
+			script = f.Content
+		}
+	}
+	xray := strings.Index(script, "systemctl restart xray")
+	wg := strings.Index(script, "wg-quick up")
+	if xray < 0 || wg < 0 {
+		t.Fatalf("в скрипте нет перезапуска Xray (%d) или подъёма WG (%d)", xray, wg)
+	}
+	if xray > wg {
+		t.Error("Xray перезапускается после WG-интерфейсов: занятый порт даёт «Address already in use»")
+	}
+}
+
 // Только включённые клиенты; без них интерфейс не поднимается.
 func TestClientWGConfSkipsInactive(t *testing.T) {
 	st := clientNetState()

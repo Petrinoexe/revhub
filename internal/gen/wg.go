@@ -592,10 +592,42 @@ func applyScript(wgFiles []string, useXray bool, ports []string, forward bool, k
 		b.WriteString("  firewall-cmd --reload >/dev/null 2>&1 || true\nfi\n")
 	}
 	if useXray {
+		// Xray перезапускается ДО подъёма WG-интерфейсов. Старая конфигурация
+		// могла держать UDP-порт клиентского инбаунда (userspace-wireguard в
+		// Xray): ядро биндит порт в момент `ip link set up`, и порядок
+		// «сначала WG, потом Xray» даёт вечный тупик — порт занят старым Xray,
+		// а новый конфиг без этого инбаунда не применяется, потому что
+		// применение падает.
 		b.WriteString(`XRAY_BIN=${XRAY_BIN:-xray}
 XRAY_CONFIG=${XRAY_CONFIG:-/usr/local/etc/xray/config.json}
 STATE_DIR=${STATE_DIR:-/etc/revhub}
 "$XRAY_BIN" -test -c xray.json
+install -d "$(dirname "$XRAY_CONFIG")"
+install -d -m 750 "$STATE_DIR/last-good"
+had_config=0
+if [ -f "$XRAY_CONFIG" ]; then
+  cp -a "$XRAY_CONFIG" "$STATE_DIR/last-good/xray.json"
+  had_config=1
+fi
+candidate=$(mktemp "${XRAY_CONFIG}.revhub.XXXXXX")
+trap 'rm -f -- "$candidate"' EXIT
+install -m 640 xray.json "$candidate"
+# Конфиг читает и панель (диагностика сравнивает sha256). Панель работает
+# непривилегированно, поэтому отдаём файл группе каталога состояния, а не миру.
+cfg_group=$(stat -c %G "$STATE_DIR" 2>/dev/null || true)
+if [ -n "$cfg_group" ] && [ "$cfg_group" != root ]; then chgrp "$cfg_group" "$candidate" 2>/dev/null || true; fi
+mv -fT -- "$candidate" "$XRAY_CONFIG"
+if ! systemctl restart xray || ! sleep 1 || ! systemctl is-active --quiet xray; then
+  echo "[revhub] Xray не запустился. Проверь journalctl -u xray" >&2
+  if [ "$had_config" = 1 ]; then
+    cp -a "$STATE_DIR/last-good/xray.json" "$candidate"
+    mv -fT -- "$candidate" "$XRAY_CONFIG"
+    systemctl restart xray
+  else
+    rm -f -- "$XRAY_CONFIG"
+  fi
+  exit 1
+fi
 `)
 	}
 	if len(wgFiles) > 0 {
@@ -756,36 +788,7 @@ fi
 	if !useXray {
 		return b.String()
 	}
-	b.WriteString(`
-install -d "$(dirname "$XRAY_CONFIG")"
-install -d -m 750 "$STATE_DIR/last-good"
-had_config=0
-if [ -f "$XRAY_CONFIG" ]; then
-  cp -a "$XRAY_CONFIG" "$STATE_DIR/last-good/xray.json"
-  had_config=1
-fi
-candidate=$(mktemp "${XRAY_CONFIG}.revhub.XXXXXX")
-trap 'rm -f -- "$candidate"' EXIT
-install -m 640 xray.json "$candidate"
-# Конфиг читает и панель (диагностика сравнивает sha256). Панель работает
-# непривилегированно, поэтому отдаём файл группе каталога состояния, а не миру.
-cfg_group=$(stat -c %G "$STATE_DIR" 2>/dev/null || true)
-if [ -n "$cfg_group" ] && [ "$cfg_group" != root ]; then chgrp "$cfg_group" "$candidate" 2>/dev/null || true; fi
-mv -fT -- "$candidate" "$XRAY_CONFIG"
-if ! systemctl restart xray || ! sleep 1 || ! systemctl is-active --quiet xray; then
-  echo "[revhub] Xray не запустился. Проверь journalctl -u xray" >&2
-  if [ "$had_config" = 1 ]; then
-    cp -a "$STATE_DIR/last-good/xray.json" "$candidate"
-    mv -fT -- "$candidate" "$XRAY_CONFIG"
-    systemctl restart xray
-  else
-    rm -f -- "$XRAY_CONFIG"
-  fi
-  exit 1
-fi
-
-echo "[revhub] применено. откат: ./rollback.sh"
-`)
+	b.WriteString("\necho \"[revhub] применено. откат: ./rollback.sh\"\n")
 	return b.String()
 }
 
