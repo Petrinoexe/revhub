@@ -356,11 +356,59 @@ async function runTunnelPing(id){
 
 function keyOf(r,i){ return r.id || ('i'+i); }
 
+// Панель выхода клиентских сетей. Живёт во вкладке «Маршруты»: настройка
+// выхода — это маршрутизация, а не свойство инбаунда. В инбаунде остаются
+// только его собственные параметры (подсеть, порт, DNS).
+function egressPanelHTML(){
+  const wgs = (ST.inbounds||[]).map((r,i)=>({r,i})).filter(x=>x.r.kind==='wireguard');
+  let html = `<div class="card" style="margin-bottom:14px">
+    <div class="hd"><span class="idx">⇥</span>
+      <span class="ttl">выход клиентских сетей</span>
+      <span class="sum">куда выпускать трафик клиентов WireGuard</span></div>
+    <div class="body">`;
+  if(!wgs.length){
+    html += `<div class="hint">WireGuard-инбаундов нет. Добавьте инбаунд вида «wireguard» во вкладке «Инбаунды» —
+      у него будет своя подсеть клиентов, а выход настроите здесь.</div></div></div>`;
+    return html;
+  }
+  html += `<div class="hint">Клиентская сеть и туннель — две разные подсети: клиенты получают адреса из своей,
+    туннель занимает свою (обычно /30). «Через туннель» — трафик уходит на выходной узел, там NAT'ится
+    и выходит в интернет; «напрямую» — NAT'ится на этом же узле.</div>`;
+  for(const {r,i} of wgs){
+    const wg = r.wireguard || {};
+    const node = nodeLabel(r.node_id);
+    const cur = r.egress || 'direct';
+    const tuns = (ST.tunnels||[]).filter(t=>t.enabled && t.kind!=='vless' && t.from_node_id===r.node_id);
+    const opts = [`<option value="direct" ${cur==='direct'?'selected':''}>напрямую через ${esc(node)} (NAT этого узла)</option>`]
+      .concat(tuns.map(t=>`<option value="tun:${esc(t.name)}" ${cur==='tun:'+t.name?'selected':''}>через туннель «${esc(t.name)}» → ${esc(nodeLabel(t.to_node_id))} · ${esc(t.subnet||'')}</option>`));
+    const known = cur==='direct' || tuns.some(t=>'tun:'+t.name===cur);
+    if(!known) opts.unshift(`<option selected value="${esc(cur)}">${esc(cur)} — такого туннеля нет</option>`);
+    html += `<div class="grid" style="margin:8px 0">
+      <div class="f"><label>сеть клиентов</label>
+        <div>${esc(r.tag || r.id)} · ${esc(wg.subnet || '10.88.0.0/24')} · ${esc(node)}${r.enabled?'':' · выключен'}</div></div>
+      <div class="f wide"><label>выход</label>
+        <select onchange="setEgress(${i},this.value)">${opts.join('')}</select></div>
+    </div>`;
+    if(!known) html += `<div class="hint">⚠ туннель «${esc(cur.slice(4))}» не найден на узле ${esc(node)} — маршрут не соберётся, выберите другой выход.</div>`;
+    if(cur!=='direct' && tuns.length && !r.enabled) html += `<div class="hint">инбаунд выключен — маршрут не применяется.</div>`;
+    if(cur==='direct' && !tuns.length && (ST.tunnels||[]).length) html += `<div class="hint">на этом узле нет включённого туннеля, начинающегося здесь;
+      чтобы выпускать клиентов через выходной узел, создайте туннель с началом на ${esc(node)}.</div>`;
+  }
+  html += `</div></div>`;
+  return html;
+}
+
+function setEgress(i, v){
+  if(ST.inbounds && ST.inbounds[i]) ST.inbounds[i].egress = v;
+  render();
+}
+
 function renderList(v){
   const rows = ST[TAB]||[];
   let html = `<div class="row"><button class="b" onclick="addRow('${TAB}')">+ добавить</button>
     <span class="mut">${hintFor(TAB)}</span></div>`;
   if(TAB==='nodes') html += wizardHTML();
+  if(TAB==='routes') html += egressPanelHTML();
   if(!rows.length) html += '<div class="mut">пока пусто</div>';
   rows.forEach((r,i)=>{
     const key = keyOf(r,i), open = OPEN.has(key);
@@ -399,12 +447,16 @@ function summaryOf(tab,r){
               r.mgmt_via?('via '+r.mgmt_via):'', hs,
               r.last_check?('проверен '+r.last_check.slice(11,19)):''].filter(Boolean).join(' · ');
     }
-    case 'inbounds':
+    case 'inbounds': {
+      // Подсеть клиентов показываем в карточке: иначе настройка выхода во
+      // вкладке «Маршруты» выглядит абстрактно.
+      const net = r.kind==='wireguard' ? (r.wireguard?.subnet || '10.88.0.0/24') : '';
       return [nodeLabel(r.node_id), r.kind==='wireguard'?'WireGuard / UDP':'VLESS / '+(r.transport||'tcp')+'/'+(r.security||'none'),
-              ':'+(r.port||'?'), r.enabled?'':'выключен'].filter(Boolean).join(' · ');
+              ':'+(r.port||'?'), net, r.enabled?'':'выключен'].filter(Boolean).join(' · ');
+    }
     case 'tunnels': {
       const who = r.kind==='wg' ? 'слушает '+(r.to_node_id||'?') : 'слушает '+(r.from_node_id||'?');
-      return [(r.from_node_id||'?')+' → '+(r.to_node_id||'?'), who,
+      return [(r.from_node_id||'?')+' → '+(r.to_node_id||'?'), who, r.kind==='vless'?'':(r.subnet||''),
               r.kind==='vless'?'':'mark '+(r.mark||'?'), r.enabled?'':'выключен'].filter(Boolean).join(' · ');
     }
     case 'clients': {
@@ -472,7 +524,6 @@ function bodyOf(tab,i,r){
     html += `<div class="grp">WireGuard</div><div class="grid">
       <div class="f"><label>Подсеть клиентов</label><input value="${esc(wg.subnet || '10.88.0.0/24')}" onchange="setWGSubnet(${i},this.value.trim())"></div>
       <div class="f"><label>DNS клиентам (IP через запятую)</label><input value="${esc(wg.dns || '1.1.1.1, 1.0.0.1')}" onchange="setWGDNS(${i},this.value.trim())"></div>
-      <div class="f"><label>Выход клиентов</label>${cell(tab,i,r,{k:'egress',l:'Выход клиентов',egress:true})}</div>
       <div class="f wide"><label>Публичный ключ сервера</label><input readonly value="${esc(wg.public_key)}" placeholder="Генерируется при сохранении"></div>
     </div>`;
   }
