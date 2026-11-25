@@ -33,6 +33,17 @@ func (f *fakeRunner) ran(sub string) bool {
 	return false
 }
 
+func TestTunnelRejectsShellInPingHost(t *testing.T) {
+	r := &fakeRunner{}
+	_, err := Tunnel(model.Demo(), "tun-eu", "1.1.1.1; touch /tmp/revhub-pwned", "hub", Runners{Local: r})
+	if err == nil {
+		t.Fatal("shell-строка принята как цель ping")
+	}
+	if len(r.seen) != 0 {
+		t.Fatalf("до валидации цели уже выполнялись команды: %q", r.seen)
+	}
+}
+
 func TestNodeDetectsUnappliedConfig(t *testing.T) {
 	st := model.State{Version: model.StateVersion, Nodes: []model.Node{{ID: "hub"}},
 		Inbounds: []model.Inbound{{ID: "in", NodeID: "hub", Tag: "vless-main", Kind: "vless",

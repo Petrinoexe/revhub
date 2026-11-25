@@ -113,3 +113,69 @@ func TestValidateWireGuardDNS(t *testing.T) {
 		t.Errorf("список IP должен приниматься: %v", err)
 	}
 }
+
+func TestSecondTunnelGetsUniqueAddressAndPort(t *testing.T) {
+	st := Demo()
+	second := st.Tunnels[0]
+	second.ID = "tun-second"
+	second.Name = "second"
+	second.FromAddr, second.ToAddr = "", ""
+	second.Mark++
+	st.Tunnels = append(st.Tunnels, second)
+	st.Normalize()
+	got := st.Tunnels[1]
+	if got.FromAddr != "10.88.0.201" || got.ToAddr != "10.88.0.251" {
+		t.Fatalf("адреса второго туннеля: %s/%s", got.FromAddr, got.ToAddr)
+	}
+	if got.ListenPort != 51821 {
+		t.Fatalf("порт второго слушателя = %d", got.ListenPort)
+	}
+	if err := st.Validate(); err != nil {
+		t.Fatalf("два разведённых туннеля должны быть валидны: %v", err)
+	}
+}
+
+func TestValidateRejectsDuplicateTunnelEndpoints(t *testing.T) {
+	st := Demo()
+	second := st.Tunnels[0]
+	second.ID, second.Name = "tun-second", "second"
+	second.Mark++
+	st.Tunnels = append(st.Tunnels, second)
+	if err := st.Validate(); err == nil || !strings.Contains(err.Error(), "уже используется") {
+		t.Fatalf("дубли адресов/порта приняты: %v", err)
+	}
+}
+
+func TestClientEgressMustStartAtEveryInboundNode(t *testing.T) {
+	st := Demo()
+	st.Inbounds = append(st.Inbounds, Inbound{ID: "in-wg-exit", NodeID: "exit-eu", Tag: "wg-exit", Kind: InboundWireGuard, Enabled: true})
+	st.Clients[0].Inbounds = append(st.Clients[0].Inbounds, "in-wg-exit")
+	st.Clients[0].Egress = "tun:eu" // туннель начинается на hub, не на exit-eu
+	st.Normalize()
+	if err := st.Validate(); err == nil || !strings.Contains(err.Error(), "exit-eu") {
+		t.Fatalf("личный выход с чужого узла принят: %v", err)
+	}
+}
+
+func TestValidateRejectsControlCharactersInConfigFields(t *testing.T) {
+	cases := map[string]func(*State){
+		"client email": func(s *State) { s.Clients[0].Email = "alice\n[Interface]\nPostUp = true" },
+		"node name":    func(s *State) { s.Nodes[0].Name = "hub\nbad" },
+		"node address": func(s *State) { s.Nodes[0].PublicAddr = "hub.example.com\rbad" },
+		"inbound path": func(s *State) { s.Inbounds[0].Path = "/ws\nbad" },
+		"tunnel name":  func(s *State) { s.Tunnels[0].Name = "eu\nbad" },
+		"route name":   func(s *State) { s.Routes[0].Name = "rule\nbad" },
+		"DNS zone":     func(s *State) { s.DNS = &DNSConfig{Root: "vpn.internal\nbad"} },
+		"panel listen": func(s *State) { s.Panel.Listen = "127.0.0.1:2096\nbad" },
+	}
+	for name, mutate := range cases {
+		t.Run(name, func(t *testing.T) {
+			st := Demo()
+			mutate(&st)
+			err := st.Validate()
+			if err == nil || !strings.Contains(err.Error(), "управляющие символы") {
+				t.Fatalf("поле с управляющими символами принято: %v", err)
+			}
+		})
+	}
+}

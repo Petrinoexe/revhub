@@ -761,7 +761,7 @@ After=wg-quick@%s.service
 
 [Service]
 Type=oneshot
-ExecStart=/etc/revhub/kick-%s.sh
+ExecStart=/usr/local/libexec/revhub/kick-%s.sh
 `, k.Iface, k.Iface, k.Iface), Mode: 0o644})
 		out = append(out, File{Name: "revhub-kick-" + k.Iface + ".timer",
 			Content: fmt.Sprintf(`[Unit]
@@ -819,7 +819,10 @@ if [ -f "$XRAY_CONFIG" ]; then
 fi
 candidate=$(mktemp "${XRAY_CONFIG}.revhub.XXXXXX")
 trap 'rm -f -- "$candidate"' EXIT
-install -m 640 xray.json "$candidate"
+if ! install -m 640 xray.json "$candidate" 2>/dev/null; then
+  echo "[revhub] не записался xray.json (каталог только для чтения?) — конфиг ядра не обновится" >&2
+  exit 1
+fi
 # Конфиг читает и панель (диагностика сравнивает sha256). Панель работает
 # непривилегированно, поэтому отдаём файл группе каталога состояния, а не миру.
 cfg_group=$(stat -c %G "$STATE_DIR" 2>/dev/null || true)
@@ -901,7 +904,10 @@ fi
 			"    wg-quick down %q >/dev/null 2>&1 || true\n"+
 			"    if ip link show dev %q >/dev/null 2>&1; then ip link delete dev %q 2>/dev/null || true; fi\n"+
 			"  fi\n"+
-			"  install -m 600 %q /etc/wireguard/%q\n"+
+			"  if ! install -m 600 %q /etc/wireguard/%q 2>/dev/null; then\n"+
+			"    echo \"[revhub] не записался /etc/wireguard/%q (только для чтения?)\" >&2\n"+
+			"    exit 1\n"+
+			"  fi\n"+
 			// Ядро биндит UDP-порт WG-устройства в момент `ip link set up`:
 			// если порт занят (свой wg0, другой интерфейс, служба), up падает
 			// с «Address already in use», хотя адрес интерфейса свободен.
@@ -923,7 +929,7 @@ fi
 			"  fi\n"+
 			"fi\n",
 			f, f, name, "wg-quick@"+name+".service", name, name, name, name,
-			f, f, f, f, name, name, f, f)
+			f, f, f, f, f, name, name, f, f)
 		// Интерфейс должен подниматься после перезагрузки: apply.sh запускается
 		// один раз, а systemd поднимет wg-quick@<имя> сам.
 		fmt.Fprintf(&b, "if [ -d /run/systemd/system ]; then systemctl enable %q >/dev/null 2>&1 || true; fi\n",
@@ -932,10 +938,11 @@ fi
 	if len(kicks) > 0 {
 		// Скрипт и таймер держат сессию без keepalive: пинг уходит только когда
 		// сессии нет. Ставим их после подъёма интерфейсов и сразу дёргаем один раз.
-		b.WriteString("install -d -m 755 /etc/revhub\n")
+		b.WriteString("install -d -m 700 /usr/local/libexec/revhub\n")
 		for _, k := range kicks {
-			fmt.Fprintf(&b, "install -m 755 %q /etc/revhub/%q\n",
-				"kick-"+k.Iface+".sh", "kick-"+k.Iface+".sh")
+			fmt.Fprintf(&b, "install -m 700 %q /usr/local/libexec/revhub/%q 2>/dev/null || "+
+				"echo \"[revhub] не записался скрипт %q (только для чтения?)\" >&2\n",
+				"kick-"+k.Iface+".sh", "kick-"+k.Iface+".sh", "kick-"+k.Iface+".sh")
 		}
 		b.WriteString("if [ -d /run/systemd/system ]; then\n")
 		for _, k := range kicks {
@@ -950,25 +957,41 @@ fi
 		}
 		b.WriteString("fi\n")
 		for _, k := range kicks {
-			fmt.Fprintf(&b, "/etc/revhub/%q\n", "kick-"+k.Iface+".sh")
+			fmt.Fprintf(&b, "/usr/local/libexec/revhub/%q\n", "kick-"+k.Iface+".sh")
 		}
 	}
 	if forward {
 		// Рантайм-настройка PostUp живёт до перезагрузки; drop-in оставляет её
 		// навсегда, иначе «туннель поднят, но не водит трафик» после ребута.
-		b.WriteString(`install -d -m 755 /etc/sysctl.d
-printf '%s\n' 'net.ipv4.ip_forward=1' > /etc/sysctl.d/90-revhub.conf
-sysctl -q -p /etc/sysctl.d/90-revhub.conf 2>/dev/null || sysctl -q -w net.ipv4.ip_forward=1
+		b.WriteString(`install -d -m 755 /etc/sysctl.d 2>/dev/null || true
+if printf '%s\n' 'net.ipv4.ip_forward=1' > /etc/sysctl.d/90-revhub.conf 2>/dev/null; then
+  sysctl -q -p /etc/sysctl.d/90-revhub.conf 2>/dev/null || sysctl -q -w net.ipv4.ip_forward=1 || true
+else
+  echo "[revhub] не записался /etc/sysctl.d/90-revhub.conf (только для чтения?) — включаю форвардинг на сессию" >&2
+  sysctl -q -w net.ipv4.ip_forward=1 2>/dev/null || echo "[revhub] ip_forward не включился — включи на узле сам" >&2
+fi
 `)
 	}
 	if dnsOn {
+		// DNS — вспомогательная часть: если /etc/dnsmasq.d только для чтения
+		// (бывает в контейнерах), применение сети не должно падать целиком.
+		// Пишем предупреждение и продолжаем — сеть важнее зоны имён.
 		b.WriteString(`
-install -d -m 755 /etc/dnsmasq.d /etc/revhub
+install -d -m 755 /etc/dnsmasq.d /etc/revhub 2>/dev/null || true
 dns_changed=0
-cmp -s dnsmasq-revhub.conf /etc/dnsmasq.d/revhub.conf || dns_changed=1
-install -m 644 dnsmasq-revhub.conf /etc/dnsmasq.d/revhub.conf
-install -m 644 dns-hosts /etc/revhub/dns-hosts
-if ! command -v dnsmasq >/dev/null 2>&1; then
+dns_ok=1
+cmp -s dnsmasq-revhub.conf /etc/dnsmasq.d/revhub.conf 2>/dev/null || dns_changed=1
+if ! install -m 644 dnsmasq-revhub.conf /etc/dnsmasq.d/revhub.conf 2>/dev/null; then
+  dns_ok=0
+  echo "[revhub] не записался /etc/dnsmasq.d/revhub.conf (файловая система только для чтения?) — зона DNS не обновится, сеть применяется дальше" >&2
+fi
+if ! install -m 644 dns-hosts /etc/revhub/dns-hosts 2>/dev/null; then
+  dns_ok=0
+  echo "[revhub] не записался /etc/revhub/dns-hosts — имена клиентов в DNS не обновятся" >&2
+fi
+if [ "$dns_ok" = 0 ]; then
+  :
+elif ! command -v dnsmasq >/dev/null 2>&1; then
   echo "[revhub] dnsmasq не установлен: зона DNS не поднята (apt install dnsmasq)" >&2
 elif [ "$dns_changed" = 1 ]; then
   # Адреса, зона и порт читаются только при старте: SIGHUP перечитывает hosts.
@@ -977,12 +1000,16 @@ elif [ "$dns_changed" = 1 ]; then
 else
   systemctl reload dnsmasq >/dev/null 2>&1 || systemctl restart dnsmasq >/dev/null 2>&1 || true
 fi
+if [ "$dns_ok" = 0 ]; then
+  echo "[revhub] сеть применена, но DNS — нет: общий статус применения — ошибка" >&2
+  exit 1
+fi
 `)
 	} else {
 		// DNS выключили или перенесли на другой узел — убираем за собой.
 		b.WriteString(`
 if [ -f /etc/dnsmasq.d/revhub.conf ]; then
-  rm -f /etc/dnsmasq.d/revhub.conf /etc/revhub/dns-hosts
+  rm -f /etc/dnsmasq.d/revhub.conf /etc/revhub/dns-hosts 2>/dev/null || true
   # try-restart трогает сервис, только если он запущен: на узле без DNS он не нужен
   systemctl reload dnsmasq >/dev/null 2>&1 || systemctl try-restart dnsmasq >/dev/null 2>&1 || true
   # Свой конфиг убрали; если чужих в /etc/dnsmasq.d нет, глушим сервис —
@@ -1007,7 +1034,7 @@ func rollbackScript(wgFiles []string, useXray bool, kicks []kick) string {
 	b.WriteString("STATE_DIR=${STATE_DIR:-/etc/revhub}\n")
 	for _, k := range kicks {
 		fmt.Fprintf(&b, "systemctl disable --now %q >/dev/null 2>&1 || true\n", "revhub-kick-"+k.Iface+".timer")
-		fmt.Fprintf(&b, "rm -f /etc/systemd/system/%q /etc/systemd/system/%q /etc/revhub/%q\n",
+		fmt.Fprintf(&b, "rm -f /etc/systemd/system/%q /etc/systemd/system/%q /usr/local/libexec/revhub/%q\n",
 			"revhub-kick-"+k.Iface+".service", "revhub-kick-"+k.Iface+".timer", "kick-"+k.Iface+".sh")
 	}
 	if len(kicks) > 0 {

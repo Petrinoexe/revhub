@@ -12,6 +12,31 @@ import (
 	"revhub/internal/model"
 )
 
+func TestExpiredVLESSClientExcludedFromServer(t *testing.T) {
+	st := model.Demo()
+	st.Clients[0].ExpiresAt = "2000-01-01T00:00:00Z"
+	raw, err := XrayJSON(st, "hub")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cfg map[string]any
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	for _, item := range cfg["inbounds"].([]any) {
+		in := item.(map[string]any)
+		if in["tag"] != "hub-reality" {
+			continue
+		}
+		clients := in["settings"].(map[string]any)["clients"].([]any)
+		if len(clients) != 0 {
+			t.Fatalf("истёкший UUID остался на сервере: %v", clients)
+		}
+		return
+	}
+	t.Fatal("нет клиентского инбаунда")
+}
+
 func TestHubConfig(t *testing.T) {
 	st := model.Demo()
 	raw, err := XrayJSON(st, "hub")
@@ -217,8 +242,11 @@ func TestDialerGetsKickInsteadOfKeepalive(t *testing.T) {
 	if !strings.Contains(byName["apply.sh"].Content, `systemctl enable --now "revhub-kick-wg-eu.timer"`) {
 		t.Error("apply.sh не включает таймер")
 	}
-	if !strings.Contains(byName["apply.sh"].Content, `/etc/revhub/"kick-wg-eu.sh"`) {
-		t.Error("apply.sh не дёргает раскачку сразу после подъёма")
+	if !strings.Contains(byName["apply.sh"].Content, `/usr/local/libexec/revhub/"kick-wg-eu.sh"`) {
+		t.Error("apply.sh не дёргает раскачку из root-owned каталога")
+	}
+	if !strings.Contains(byName["revhub-kick-wg-eu.service"].Content, "ExecStart=/usr/local/libexec/revhub/kick-wg-eu.sh") {
+		t.Error("root-таймер ссылается на изменяемый панелью скрипт")
 	}
 	// На слушающей стороне раскачки быть не должно — она ничего не дозванивает.
 	hubFiles, err := Artifacts(st, "hub")
@@ -473,6 +501,30 @@ func TestApplyRestoresXrayConfigOnFailedRestart(t *testing.T) {
 	}
 	if got, err := os.ReadFile(config); err != nil || string(got) != "old" {
 		t.Fatalf("previous Xray config was not restored: %v", err)
+	}
+}
+
+func TestApplyReportsDNSWriteFailureAfterNetwork(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name, content string, mode os.FileMode) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(content), mode); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("apply.sh", applyScript(nil, false, nil, false, nil, true), 0o700)
+	write("dnsmasq-revhub.conf", "port=53\n", 0o600)
+	write("dns-hosts", "", 0o600)
+	write("install", "#!/bin/sh\nfor a in \"$@\"; do [ \"$a\" = /etc/dnsmasq.d/revhub.conf ] && exit 1; done\nexit 0\n", 0o700)
+	write("systemctl", "#!/bin/sh\nexit 0\n", 0o700)
+	cmd := exec.Command("bash", filepath.Join(dir, "apply.sh"))
+	cmd.Env = append(os.Environ(), "PATH="+dir+":"+os.Getenv("PATH"))
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("apply сообщил успех при незаписанном DNS: %s", out)
+	}
+	if !strings.Contains(string(out), "сеть применяется дальше") {
+		t.Fatalf("нет предупреждения о частичном применении: %s", out)
 	}
 }
 

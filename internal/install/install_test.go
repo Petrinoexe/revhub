@@ -32,6 +32,9 @@ func runSandbox(t *testing.T, mode string) (*Report, Options, string) {
 	if err != nil {
 		t.Fatalf("установка в песочницу: %v", err)
 	}
+	if info, err := os.Stat(filepath.Join(o.Prefix, "libexec", "revhub")); err != nil || info.Mode().Perm() != 0o700 {
+		t.Fatalf("root-owned libexec не создан до запуска юнита: %v", err)
+	}
 	return rep, o, dir
 }
 
@@ -364,7 +367,7 @@ func TestValidACME(t *testing.T) {
 func TestAcmeTimerRendered(t *testing.T) {
 	dir := t.TempDir()
 	unitDir := t.TempDir()
-	o := Options{EtcDir: dir, UnitDir: unitDir}
+	o := Options{EtcDir: dir, UnitDir: unitDir, Prefix: filepath.Join(dir, "prefix")}
 	sh := filepath.Join(dir, "acme", "acme.sh")
 	r := &runner{dry: true, rep: &Report{}}
 	if err := r.writeAcmeTimer(o, sh); err != nil {
@@ -378,8 +381,9 @@ func TestAcmeTimerRendered(t *testing.T) {
 	if !strings.Contains(string(svc), "LE_WORKING_DIR="+filepath.Join(dir, "acme")) {
 		t.Errorf("в service нет LE_WORKING_DIR: %s", svc)
 	}
-	if !strings.Contains(string(svc), sh+" --cron") {
-		t.Errorf("в service неверный ExecStart: %s", svc)
+	execPath := filepath.Join(o.Prefix, "libexec", "revhub", "acme.sh")
+	if !strings.Contains(string(svc), "ExecStart="+execPath+" --cron") {
+		t.Errorf("root-таймер исполняет скрипт не из root-owned libexec: %s", svc)
 	}
 	tm, err := os.ReadFile(filepath.Join(dir, "acme", "revhub-acme-renew.timer"))
 	if err != nil {
@@ -569,7 +573,7 @@ func TestUnitRunsAsPanelUser(t *testing.T) {
 	for _, want := range []string{
 		"User=revhub", "Group=revhub", "UMask=0027",
 		"ProtectSystem=full", "StateDirectoryMode=0750",
-		"ReadWritePaths=/etc/revhub /var/lib/revhub /usr/local/etc/xray /etc/wireguard -/run/sudo",
+		"ReadWritePaths=/etc/revhub /var/lib/revhub /usr/local/etc/xray /usr/local/libexec/revhub /etc/wireguard /etc/dnsmasq.d /etc/sysctl.d /etc/systemd/system -/run/sudo",
 		"RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK",
 		"AmbientCapabilities=CAP_NET_BIND_SERVICE",
 	} {
@@ -784,9 +788,27 @@ func TestRepairDryRunKeepsState(t *testing.T) {
 	}
 }
 
-// Правило sudo не должно содержать аргументов: sudo сравнивает их буквально и
-// «revhub apply-local» разрешал бы только вызов без --node/--state.
-func TestApplySudoersBodyHasNoArguments(t *testing.T) {
+func TestRenderPrivateArtifacts(t *testing.T) {
+	dir, err := renderPrivateArtifacts(model.Demo(), "hub")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+	info, err := os.Stat(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != 0o700 {
+		t.Fatalf("права приватного рендера = %o", got)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "apply.sh")); err != nil {
+		t.Fatalf("apply.sh не отрендерен: %v", err)
+	}
+}
+
+// В sudoers остаются только применение конфига и рестарт самой панели,
+// а не любая подкоманда CLI от root.
+func TestApplySudoersBodyRestrictsCommands(t *testing.T) {
 	body := applySudoersBody("revhub", "/usr/local/bin/revhub")
 	var rule string
 	for _, line := range strings.Split(body, "\n") {
@@ -794,11 +816,23 @@ func TestApplySudoersBodyHasNoArguments(t *testing.T) {
 			rule = line
 		}
 	}
-	if rule != "revhub ALL=(root) NOPASSWD: /usr/local/bin/revhub" {
+	want := "revhub ALL=(root) NOPASSWD: /usr/local/bin/revhub apply-local *, /usr/local/bin/revhub restart"
+	if rule != want {
 		t.Fatalf("правило: %q", rule)
 	}
-	if strings.Contains(rule, "apply-local") {
-		t.Error("аргументы в правиле ломают вызов с --node/--state")
+}
+
+func TestEnsureReadWritePathsDoesNotDuplicateFirstPath(t *testing.T) {
+	got, changed := ensureReadWritePaths("ReadWritePaths=/usr/local/etc/xray")
+	if !changed {
+		t.Fatal("миграция должна дописать остальные каталоги")
+	}
+	if n := strings.Count(got, "/usr/local/etc/xray"); n != 1 {
+		t.Fatalf("первый путь продублирован %d раза: %s", n, got)
+	}
+	again, changed := ensureReadWritePaths(got)
+	if changed || again != got {
+		t.Fatalf("повторная миграция не идемпотентна: %q → %q", got, again)
 	}
 }
 
@@ -822,7 +856,7 @@ RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
 	got, _ := os.ReadFile(p)
 	for _, want := range []string{
 		"ProtectSystem=full",
-		"ReadWritePaths=/etc/revhub /var/lib/revhub /usr/local/etc/xray /etc/wireguard -/run/sudo",
+		"ReadWritePaths=/etc/revhub /var/lib/revhub /usr/local/etc/xray /usr/local/libexec/revhub /etc/wireguard /etc/dnsmasq.d /etc/sysctl.d /etc/systemd/system -/run/sudo",
 		"RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK",
 		"ExecStart=/usr/local/bin/revhub serve",
 	} {

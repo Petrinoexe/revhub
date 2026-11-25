@@ -16,6 +16,7 @@ import (
 	"revhub/internal/bootstrap"
 	"revhub/internal/certs"
 	"revhub/internal/gen"
+	"revhub/internal/mgmt"
 	"revhub/internal/model"
 	"revhub/internal/secrets"
 	"revhub/internal/sshx"
@@ -338,6 +339,53 @@ func (s *Service) Run(req Request) (*Report, error) {
 	return rep, nil
 }
 
+// runExisting применяет готовый узел через WG, а публичный SSH использует
+// только если само подключение через туннель не установилось. Ошибку уже
+// открытой сессии или apply повторять через другой адрес нельзя.
+func (s *Service) runExisting(st model.State, node model.Node, plan bootstrap.Plan) (*bootstrap.Result, string, error) {
+	sec, _ := s.Secrets.Get(node.ID)
+	addresses := mgmt.Addrs(st, node)
+	if len(addresses) == 0 {
+		return &bootstrap.Result{}, "", fmt.Errorf("для узла %s нет SSH-адреса", node.ID)
+	}
+	open := s.opener()
+	var last *bootstrap.Result
+	var errs []string
+	for _, addr := range addresses {
+		connected := false
+		res, err := bootstrap.RunWith(func(target sshx.Target) (bootstrap.Runner, error) {
+			r, err := open(target)
+			if err == nil {
+				connected = true
+			}
+			return r, err
+		}, sshx.Target{
+			Addr: addr, User: node.SSHUser,
+			Password: sec.Password, KeyPEM: []byte(sec.PrivateKey), HostKey: node.HostKey,
+		}, plan, nil)
+		last = res
+		via := "direct"
+		if host, _, splitErr := net.SplitHostPort(addr); splitErr == nil {
+			for _, t := range st.Tunnels {
+				if t.Enabled && t.ToNode == node.ID && t.Kind != model.TunnelVLESS {
+					_, to, addrErr := t.Addrs()
+					if addrErr == nil && host == to {
+						via = "tunnel:" + t.Name
+					}
+				}
+			}
+		}
+		if err == nil {
+			return res, via, nil
+		}
+		errs = append(errs, addr+": "+err.Error())
+		if connected {
+			return res, via, err
+		}
+	}
+	return last, "", fmt.Errorf("%s", strings.Join(errs, "; "))
+}
+
 // reinstall ставит заново уже описанный узел: артефакты берутся из модели как есть.
 func (s *Service) reinstall(req Request) (*Report, error) {
 	rep := &Report{NodeID: req.NodeID}
@@ -362,14 +410,10 @@ func (s *Service) reinstall(req Request) (*Report, error) {
 		}
 	}
 	needXray := !needWG || gen.NeedsXray(st, node.ID)
-	sec, _ := s.Secrets.Get(node.ID)
-	res, err := bootstrap.RunWith(s.opener(), sshx.Target{
-		Addr: node.SSHAddr, User: node.SSHUser,
-		Password: sec.Password, KeyPEM: []byte(sec.PrivateKey), HostKey: node.HostKey,
-	}, bootstrap.Plan{
+	res, via, err := s.runExisting(st, node, bootstrap.Plan{
 		Artifacts: files, InstallXray: needXray, InstallWG: needWG,
 		XrayUnit: xrayUnit, RemoteDir: "/opt/revhub",
-	}, nil)
+	})
 	if err != nil {
 		_ = s.Store.Patch(func(st *model.State) error {
 			markNode(st, node.ID, "dead", "", res.Text())
@@ -385,6 +429,7 @@ func (s *Service) reinstall(req Request) (*Report, error) {
 			return nil
 		}
 		n.HostKey, n.Status = res.HostKey, "alive"
+		n.MgmtVia = via
 		n.LastBootstrap = time.Now().UTC().Format(time.RFC3339)
 		n.BootstrapLog = res.Text()
 		return nil

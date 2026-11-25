@@ -39,7 +39,7 @@ func Links(st model.State, c model.Client) []string {
 		case model.InboundWireGuard:
 			peer, ok := c.WireGuard[in.ID]
 			if ok && in.WireGuard != nil && node.PublicAddr != "" {
-				out = append(out, wireGuardLink(in, wgEndpoint(in, node), c, peer))
+				out = append(out, wireGuardLink(in, wgEndpoint(in, node), c, peer, wireGuardDNS(st, in)))
 			}
 		}
 	}
@@ -52,14 +52,13 @@ func Payload(links []string) string {
 }
 
 // wireguard:// соответствует формату импорта v2rayN.
-func wireGuardLink(in model.Inbound, endpoint string, c model.Client, peer model.WireGuardPeer) string {
+func wireGuardLink(in model.Inbound, endpoint string, c model.Client, peer model.WireGuardPeer, dns string) string {
 	q := url.Values{
 		"publickey": {in.WireGuard.PublicKey}, "presharedkey": {peer.PresharedKey},
 		"address": {peer.Address}, "mtu": {strconv.Itoa(model.DefaultWireGuardMTU)},
 	}
-	// DNS инбаунда: клиенты, которые его понимают (sing-box/Throne, свежий
-	// v2rayN), резолвят имена внутри туннеля, а не системным резолвером.
-	if dns := strings.TrimSpace(in.WireGuard.DNS); dns != "" {
+	// DNS совпадает с wg-quick конфигом, включая внутреннюю зону dnsmasq.
+	if strings.TrimSpace(dns) != "" {
 		q.Set("dns", dns)
 	}
 	u := url.URL{
@@ -83,8 +82,9 @@ func vlessLink(in model.Inbound, node model.Node, host string, port int, c model
 	q.Set("type", orDefault(in.Transport, "tcp"))
 	q.Set("encryption", "none")
 	q.Set("security", orDefault(in.Security, "none"))
-	if in.SNI != "" {
-		q.Set("sni", in.SNI)
+	sni := in.EffectiveSNI()
+	if sni != "" {
+		q.Set("sni", sni)
 	}
 	if in.Security == "tls" {
 		q.Set("fp", "chrome")
@@ -92,7 +92,7 @@ func vlessLink(in model.Inbound, node model.Node, host string, port int, c model
 		// allowInsecure, либо пин (его печатает `revhub tls info`).
 		if in.CertSource == "panel" && in.CertSHA256 != "" {
 			q.Set("pcs", in.CertSHA256)
-		} else if in.SelfSigned {
+		} else if in.SelfSigned || in.CertSource == "selfsigned" {
 			q.Set("allowInsecure", "1")
 		}
 	}
@@ -105,7 +105,7 @@ func vlessLink(in model.Inbound, node model.Node, host string, port int, c model
 		q.Set("path", in.Path)
 	}
 	if in.Transport == "ws" || in.Transport == "xhttp" {
-		q.Set("host", orDefault(in.SNI, host))
+		q.Set("host", orDefault(sni, host))
 	}
 	if flow := in.ClientFlow(c); flow != "" {
 		q.Set("flow", flow)

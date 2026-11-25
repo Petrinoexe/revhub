@@ -307,6 +307,31 @@ func listening(ss, port, proto string) bool {
 	return false
 }
 
+func pingTarget(raw string) (string, error) {
+	target := strings.TrimSpace(raw)
+	if target == "" {
+		return "1.1.1.1", nil
+	}
+	if net.ParseIP(target) != nil {
+		return target, nil
+	}
+	target = strings.TrimSuffix(target, ".")
+	if len(target) == 0 || len(target) > 253 {
+		return "", fmt.Errorf("цель ping: нужен IP или DNS-имя")
+	}
+	for _, label := range strings.Split(target, ".") {
+		if len(label) == 0 || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
+			return "", fmt.Errorf("цель ping %q: некорректное DNS-имя", raw)
+		}
+		for _, r := range label {
+			if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '-') {
+				return "", fmt.Errorf("цель ping %q: нужен IP или DNS-имя без shell-символов", raw)
+			}
+		}
+	}
+	return target, nil
+}
+
 // Tunnel проверяет связь по туннелю: рукопожатие WireGuard, пинг до дальнего
 // конца по самому интерфейсу и, если задан host, пинг внешнего адреса через
 // выходной узел.
@@ -319,6 +344,14 @@ func Tunnel(st model.State, tunnelID, host, localNode string, rs Runners) (Repor
 	}
 	if t.ID == "" {
 		return Report{}, fmt.Errorf("туннель %q не найден", tunnelID)
+	}
+	target := ""
+	if t.Kind != model.TunnelVLESS {
+		var err error
+		target, err = pingTarget(host)
+		if err != nil {
+			return Report{}, err
+		}
 	}
 	from, fromLocal, err := rs.pick(t.FromNode, localNode)
 	if err != nil {
@@ -348,13 +381,6 @@ func Tunnel(st model.State, tunnelID, host, localNode string, rs Runners) (Repor
 		fmt.Sprintf("ping -c 3 -W 2 -I %s %s", iface, toAddr), "туннель не пропускает даже ICMP между концами")
 
 	// Пинг «в мир» через выходной узел: проверяет NAT и forwarding на To.
-	target := strings.TrimSpace(host)
-	if target == "" {
-		target = "1.1.1.1"
-	}
-	if net.ParseIP(target) == nil && strings.Contains(target, "/") {
-		target = "1.1.1.1"
-	}
 	world := pingItem(from, "пинг "+target+" через выходной узел",
 		fmt.Sprintf("ping -c 3 -W 2 -I %s %s", iface, target),
 		"туннель жив, но выходной узел не выпускает трафик: проверь NAT и ip_forward на нём")

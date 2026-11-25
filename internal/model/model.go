@@ -196,6 +196,18 @@ func (in Inbound) ClientFlow(c Client) string {
 	return EffectiveFlow(flow, in.Transport, in.Security)
 }
 
+// EffectiveSNI — имя, которое клиент проверяет в TLS. Оно совпадает с
+// tlsResolve на сервере: явный SNI важнее, затем домен/IP источника сертификата.
+func (in Inbound) EffectiveSNI() string {
+	if in.SNI != "" {
+		return in.SNI
+	}
+	if in.Domain != "" {
+		return in.Domain
+	}
+	return in.IP
+}
+
 type Rule struct {
 	ID       string   `json:"id"`
 	Name     string   `json:"name"`
@@ -479,6 +491,7 @@ func (s *State) Normalize() {
 			}
 		}
 	}
+	s.assignTunnelPorts()
 	for i := range s.Clients {
 		c := &s.Clients[i]
 		if c.ID == "" {
@@ -529,6 +542,9 @@ func (s State) HasInboundTag(nodeID, tag string) bool {
 func (s State) Validate() error {
 	var errs []string
 	add := func(f string, a ...any) { errs = append(errs, fmt.Sprintf(f, a...)) }
+	if err := validateConfigText(s); err != nil {
+		add("%v", err)
+	}
 
 	nodes := map[string]bool{}
 	ids := map[string]string{}
@@ -606,6 +622,27 @@ func (s State) Validate() error {
 
 	names := map[string]bool{}
 	marks := map[string]int{}
+	tunnelAddrs := map[string]string{}
+	listenerPorts := map[string]map[int]bool{}
+	if _, ipnet, err := net.ParseCIDR(s.SharedSubnet()); err == nil {
+		server := net.IP(ipnet.IP.To4())
+		if server != nil {
+			server = server.To4()
+			server[3]++
+			tunnelAddrs[server.String()] = "сервер клиентской сети"
+		}
+	}
+	for _, c := range s.Clients {
+		if !c.Enabled || c.Expired() {
+			continue
+		}
+		for _, peer := range c.WireGuard {
+			addr := strings.TrimSuffix(peer.Address, "/32")
+			if addr != "" && tunnelAddrs[addr] == "" {
+				tunnelAddrs[addr] = "клиент " + c.Email
+			}
+		}
+	}
 	for _, t := range s.Tunnels {
 		claim(t.ID, "туннель "+t.Name)
 		if names[t.Name] {
@@ -640,6 +677,26 @@ func (s State) Validate() error {
 						}
 					}
 				}
+			}
+			if t.Enabled {
+				for _, addr := range []string{from, to} {
+					if prev := tunnelAddrs[addr]; prev != "" {
+						add("туннель %s: адрес %s уже используется (%s)", t.Name, addr, prev)
+					} else {
+						tunnelAddrs[addr] = "туннель " + t.Name
+					}
+				}
+				if t.ListenPort <= 0 || t.ListenPort > 65535 {
+					add("туннель %s: некорректный UDP-порт %d", t.Name, t.ListenPort)
+				}
+				listener := t.ListenerNode()
+				if listenerPorts[listener] == nil {
+					listenerPorts[listener] = map[int]bool{}
+				}
+				if listenerPorts[listener][t.ListenPort] {
+					add("туннель %s: UDP-порт %d на узле %s уже используется", t.Name, t.ListenPort, listener)
+				}
+				listenerPorts[listener][t.ListenPort] = true
 			}
 			if t.Mark == 0 {
 				add("туннель %s: mark не задан", t.Name)
@@ -682,14 +739,20 @@ func (s State) Validate() error {
 		}
 		if c.Egress != "" && c.Egress != TagDirect {
 			name, ok := strings.CutPrefix(c.Egress, TagTunnel)
-			enabled := false
-			for _, t := range s.Tunnels {
-				if t.Enabled && t.Name == name {
-					enabled = true
+			for _, inboundID := range c.Inbounds {
+				in, exists := inb[inboundID]
+				if !exists || in.Kind != InboundWireGuard {
+					continue
 				}
-			}
-			if !ok || name == "" || !enabled {
-				add("клиент %s: личный выход %q — нет включённого туннеля %s", c.Email, c.Egress, name)
+				enabled := false
+				for _, t := range s.Tunnels {
+					if t.Enabled && t.Name == name && t.FromNode == in.NodeID {
+						enabled = true
+					}
+				}
+				if !ok || name == "" || !enabled {
+					add("клиент %s: личный выход %q — на узле %s нет включённого туннеля %s", c.Email, c.Egress, in.NodeID, name)
+				}
 			}
 		}
 		if len(c.Inbounds) == 0 {

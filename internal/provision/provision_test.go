@@ -169,6 +169,46 @@ func TestProvisionAddsNodeAndInstalls(t *testing.T) {
 	}
 }
 
+func TestDeployPrefersRealTunnelAddress(t *testing.T) {
+	svc, fake, _ := newService(t)
+	var addrs []string
+	svc.Open = func(target sshx.Target) (bootstrap.Runner, error) {
+		addrs = append(addrs, target.Addr)
+		return fake, nil
+	}
+	if _, err := svc.Deploy("exit-eu"); err != nil {
+		t.Fatal(err)
+	}
+	if len(addrs) != 1 || addrs[0] != "10.88.0.250:22" {
+		t.Fatalf("Deploy пошёл не по реальному адресу туннеля: %v", addrs)
+	}
+	if got := svc.Store.Snapshot().Nodes[1].MgmtVia; got != "tunnel:eu" {
+		t.Fatalf("mgmt_via = %q", got)
+	}
+}
+
+func TestDeployFallsBackToDirectOnlyWhenDialFails(t *testing.T) {
+	svc, fake, _ := newService(t)
+	var addrs []string
+	svc.Open = func(target sshx.Target) (bootstrap.Runner, error) {
+		addrs = append(addrs, target.Addr)
+		if len(addrs) == 1 {
+			return nil, errors.New("tunnel dial failed")
+		}
+		return fake, nil
+	}
+	if _, err := svc.Deploy("exit-eu"); err != nil {
+		t.Fatalf("прямой SSH должен заменить недоступный туннель: %v", err)
+	}
+	want := []string{"10.88.0.250:22", "eu.example.com:22"}
+	if strings.Join(addrs, ",") != strings.Join(want, ",") {
+		t.Fatalf("порядок адресов = %v", addrs)
+	}
+	if got := svc.Store.Snapshot().Nodes[1].MgmtVia; got != "direct" {
+		t.Fatalf("mgmt_via = %q", got)
+	}
+}
+
 func TestProvisionRejectsUnknownTLS(t *testing.T) {
 	svc, _, _ := newService(t)
 	if _, err := svc.Run(Request{Addr: "198.51.100.10", TLSBy: "reality", TunnelKind: model.TunnelWG}); err == nil {
@@ -202,7 +242,7 @@ func TestProvisionDomainIssuesACME(t *testing.T) {
 	}
 	issued := false
 	for _, c := range fake.cmds {
-		if contains(c, "--issue -d vpn.example.com") {
+		if contains(c, "--issue -d 'vpn.example.com'") {
 			issued = true
 		}
 	}

@@ -148,10 +148,13 @@ func Run(o Options) (*Report, error) {
 	// 1. каталоги
 	r.step("каталоги", func() (string, error) {
 		for _, d := range []string{o.EtcDir, filepath.Join(o.EtcDir, "tls"), o.StateDir,
-			filepath.Join(o.StateDir, "out"), filepath.Join(o.Prefix, "bin")} {
+			filepath.Join(o.StateDir, "out"), filepath.Join(o.Prefix, "bin"), rootLibexecDir(o)} {
 			if err := os.MkdirAll(d, 0o750); err != nil {
 				return "", err
 			}
+		}
+		if err := os.Chmod(rootLibexecDir(o), 0o700); err != nil {
+			return "", err
 		}
 		return fmt.Sprintf("%s, %s, %s", o.EtcDir, o.StateDir, filepath.Join(o.Prefix, "bin")), nil
 	})
@@ -323,7 +326,7 @@ func Run(o Options) (*Report, error) {
 		if o.DryRun || o.NoApply || o.NoStart {
 			return "пропущено флагами --dry-run/--no-apply/--no-start", errSkip
 		}
-		out, err := applyArtifacts(rep.ArtifactsDir, o.EtcDir)
+		out, err := applyStateArtifacts(st, rep.NodeID, o.EtcDir)
 		if err != nil {
 			return out, fmt.Errorf("%w (вывод: %s)", err, out)
 		}
@@ -467,7 +470,11 @@ func Repair(o Options, statePath string) (*Report, error) {
 		if o.DryRun {
 			return "пропущено: --dry-run", errSkip
 		}
-		out, err := applyArtifacts(rep.ArtifactsDir, o.EtcDir)
+		st, err := readState(statePath)
+		if err != nil {
+			return "", err
+		}
+		out, err := applyStateArtifacts(st, rep.NodeID, o.EtcDir)
 		if err != nil {
 			return out, fmt.Errorf("%w (вывод: %s)", err, out)
 		}
@@ -699,18 +706,45 @@ func validACME(path string) bool {
 		strings.Contains(txt, "acme.sh")
 }
 
-// ensureACME возвращает путь к acme.sh, скачивая его в <EtcDir>/acme при
-// необходимости. Рядом кладём systemd-таймер продления: acme.sh ставит cron
-// через свой installer, а нам нужен предсказуемый путь без cron.
+func rootLibexecDir(o Options) string {
+	prefix := o.Prefix
+	if prefix == "" {
+		prefix = "/usr/local"
+	}
+	return filepath.Join(prefix, "libexec", "revhub")
+}
+
+func acmeLibexec(o Options) string {
+	return filepath.Join(rootLibexecDir(o), "acme.sh")
+}
+
+// ensureACME возвращает путь к acme.sh. Скрипт, который запускает root-таймер,
+// живёт в root-owned libexec, а не в группово-записываемом /etc/revhub.
 func (r *runner) ensureACME(o Options) (string, error) {
+	dst := acmeLibexec(o)
+	if validACME(dst) {
+		return dst, nil
+	}
+	legacy := filepath.Join(o.EtcDir, "acme", "acme.sh")
+	if validACME(legacy) {
+		if r.dry {
+			return dst, nil
+		}
+		if err := os.MkdirAll(filepath.Dir(dst), 0o700); err != nil {
+			return "", err
+		}
+		if err := runCmd("install", "-m", "700", legacy, dst); err != nil {
+			return "", err
+		}
+		return dst, nil
+	}
 	if sh := acmeScript(o.EtcDir); sh != "" {
 		return sh, nil
 	}
-	dst := filepath.Join(o.EtcDir, "acme", "acme.sh")
 	if r.dry {
 		return dst, nil
 	}
-	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(dst), 0o700); err != nil {
 		return "", err
 	}
 	var errs []string
@@ -735,8 +769,8 @@ func (r *runner) ensureACME(o Options) (string, error) {
 		r.rep.Steps = append(r.rep.Steps, Step{Name: "  acme.sh", Detail: dst + " ← " + u})
 		break
 	}
-	sh := acmeScript(o.EtcDir)
-	if sh == "" {
+	sh := dst
+	if !validACME(sh) {
 		return "", fmt.Errorf("не смог скачать acme.sh (%s). "+
 			"Либо поставь его вручную, либо выбери TLS «самоподписанный на IP» — он не требует ACME",
 			strings.Join(errs, "; "))
@@ -750,6 +784,9 @@ func (r *runner) ensureACME(o Options) (string, error) {
 // writeAcmeTimer кладёт юнит и таймер ежедневного продления. Cert-файлы
 // обновляются самим acme.sh (reloadcmd запоминается при --install-cert).
 func (r *runner) writeAcmeTimer(o Options, sh string) error {
+	if filepath.Clean(sh) == filepath.Clean(filepath.Join(o.EtcDir, "acme", "acme.sh")) {
+		sh = acmeLibexec(o)
+	}
 	dir := filepath.Join(o.EtcDir, "acme")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
@@ -1083,19 +1120,14 @@ func (r *runner) grantApplyLocal(o Options) (string, error) {
 	return fmt.Sprintf("%s: %s может выполнить %s", path, o.PanelUser, bin), nil
 }
 
-// applySudoersBody — правило sudo для применения конфига.
-//
-// Аргументы после пути НЕ указываем: sudo сопоставляет их буквально, поэтому
-// строка «revhub apply-local» разрешала бы только вызов без параметров, а панель
-// передаёт ещё --node/--state. Что именно можно запускать от root, решает сам
-// бинарь: apply-local — единственная подкоманда, которой нужен root, и она
-// заново рендерит артефакты из state.json, а не исполняет чужие скрипты.
+// applySudoersBody — узкое правило sudo для применения конфига и рестарта
+// панели. Другие подкоманды CLI (в том числе restart --unit) root запускает сам.
 func applySudoersBody(panelUser, bin string) string {
 	return fmt.Sprintf(`# revhub: панель применяет конфиг ядра и WireGuard через собственный бинарь
-# (apply.sh из каталога панели root не исполняет — артефакты рендерятся заново)
-# Аргументы не ограничиваем: sudo сравнивает их буквально и сломался бы на --node.
-%s ALL=(root) NOPASSWD: %s
-`, panelUser, bin)
+# apply-local заново рендерит root-owned артефакты из state.json.
+# restart без аргументов перезапускает только revhub.service.
+%s ALL=(root) NOPASSWD: %s apply-local *, %s restart
+`, panelUser, bin, bin)
 }
 
 // unitPanelUser — пользователь из строки User= юнита ("" если юнита нет).
@@ -1118,6 +1150,40 @@ func unitPanelUser(path string) string {
 // пишет /usr/local/etc/xray и /etc/wireguard, wg-quick нужен AF_NETLINK, а
 // sudo — /run/sudo. ExecStart и остальные строки не трогаем: установщик мог
 // собрать их с нестандартными путями.
+// panelReadWritePaths — каталоги, которые панель и её применение пишут при
+// ProtectSystem=full. Список держим в одном месте: и шаблон юнита, и миграция
+// старых юнитов берут его отсюда.
+var panelReadWritePaths = []string{
+	"/usr/local/etc/xray",       // xray.json
+	"/usr/local/libexec/revhub", // root-only helper scripts
+	"/etc/wireguard",            // wg-quick конфиги
+	"/etc/dnsmasq.d",            // зона DNS клиентов
+	"/etc/sysctl.d",             // ip_forward навсегда
+	"/etc/systemd/system",       // юниты разбуживания туннеля
+	"-/run/sudo",                // отметка времени sudo
+}
+
+// ensureReadWritePaths дописывает в строку ReadWritePaths недостающие каталоги.
+func ensureReadWritePaths(line string) (string, bool) {
+	key, values, _ := strings.Cut(line, "=")
+	fields := strings.Fields(values)
+	have := make(map[string]bool, len(fields))
+	for _, f := range fields {
+		have[f] = true
+	}
+	changed := false
+	for _, p := range panelReadWritePaths {
+		if !have[p] {
+			fields = append(fields, p)
+			changed = true
+		}
+	}
+	if !changed {
+		return line, false
+	}
+	return key + "=" + strings.Join(fields, " "), true
+}
+
 func upgradePanelUnit(path string) (bool, error) {
 	b, err := os.ReadFile(path)
 	if err != nil {
@@ -1131,8 +1197,12 @@ func upgradePanelUnit(path string) (bool, error) {
 			lines[i] = "ProtectSystem=full"
 			changed = true
 		case strings.HasPrefix(line, "ReadWritePaths="):
-			if !strings.Contains(line, "/usr/local/etc/xray") {
-				lines[i] = strings.TrimSpace(line) + " /usr/local/etc/xray /etc/wireguard -/run/sudo"
+			// ProtectSystem=full делает /etc только для чтения внутри юнита, а
+			// apply-local через sudo работает в этом же namespace. Значит все
+			// каталоги, куда пишет применение, должны быть перечислены — иначе
+			// «install: cannot create ... Read-only file system» на ровном месте.
+			if fixed, ok := ensureReadWritePaths(line); ok {
+				lines[i] = fixed
 				changed = true
 			}
 		case strings.HasPrefix(line, "RestrictAddressFamilies="):
@@ -1519,7 +1589,7 @@ ProtectSystem=full
 # Каталоги, а не файлы: панель пишет состояние через временный файл рядом.
 # xray/ и wireguard/ — потому что apply-local (через sudo, в этом же namespace)
 # кладёт туда конфиги; /run/sudo — отметка времени sudo.
-ReadWritePaths=%[1]s %[7]s /usr/local/etc/xray /etc/wireguard -/run/sudo
+ReadWritePaths=%[1]s %[7]s /usr/local/etc/xray /usr/local/libexec/revhub /etc/wireguard /etc/dnsmasq.d /etc/sysctl.d /etc/systemd/system -/run/sudo
 # sudo нужен для применения конфига (apply-local); NoNewPrivileges и
 # ограничение CapabilityBoundingSet его бы заблокировали.
 AmbientCapabilities=CAP_NET_BIND_SERVICE
@@ -1825,8 +1895,44 @@ func samePath(a, b string) bool {
 	return err1 == nil && err2 == nil && ra == rb
 }
 
-// applyArtifacts запускает apply.sh из каталога артефактов. Установщик уже
-// работает от root, поэтому sudo не нужен; PATH задаём явно — под root через
+// renderPrivateArtifacts заново создаёт root-owned набор вне каталогов панели.
+// root никогда не выполняет apply.sh, который пользователь панели мог заменить.
+func renderPrivateArtifacts(st model.State, nodeID string) (string, error) {
+	files, err := gen.Artifacts(st, nodeID)
+	if err != nil {
+		return "", err
+	}
+	dir, err := os.MkdirTemp("", "revhub-install-apply-*")
+	if err != nil {
+		return "", err
+	}
+	ok := false
+	defer func() {
+		if !ok {
+			_ = os.RemoveAll(dir)
+		}
+	}()
+	if err := os.Chmod(dir, 0o700); err != nil {
+		return "", err
+	}
+	if _, err := gen.WriteArtifacts(dir, files); err != nil {
+		return "", err
+	}
+	ok = true
+	return dir, nil
+}
+
+func applyStateArtifacts(st model.State, nodeID, etcDir string) (string, error) {
+	dir, err := renderPrivateArtifacts(st, nodeID)
+	if err != nil {
+		return "", err
+	}
+	defer os.RemoveAll(dir)
+	return applyArtifacts(dir, etcDir)
+}
+
+// applyArtifacts запускает apply.sh из приватного root-owned каталога.
+// Установщик уже работает от root, поэтому sudo не нужен; PATH задаём явно — под root через
 // sudo/ssh он не всегда содержит /usr/local/bin, где лежит ядро.
 func applyArtifacts(dir, etcDir string) (string, error) {
 	if dir == "" {

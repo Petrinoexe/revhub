@@ -65,6 +65,34 @@ func (s State) SharedSubnet() string {
 	return DefaultWireGuardSubnet
 }
 
+// assignTunnelPorts разводит WG-слушателей на каждом узле. Новый туннель
+// сдвигается на свободный UDP-порт, а не обрывает сохранение всей модели.
+func (s *State) assignTunnelPorts() {
+	taken := map[string]map[int]bool{}
+	for i := range s.Tunnels {
+		t := &s.Tunnels[i]
+		if !t.Enabled || (t.Kind != TunnelWG && t.Kind != TunnelWGReverse) {
+			continue
+		}
+		node := t.ListenerNode()
+		if taken[node] == nil {
+			taken[node] = map[int]bool{}
+		}
+		ports := taken[node]
+		if t.ListenPort > 0 && !ports[t.ListenPort] {
+			ports[t.ListenPort] = true
+			continue
+		}
+		for p := 51820; p < 65535; p++ {
+			if !ports[p] {
+				t.ListenPort = p
+				ports[p] = true
+				break
+			}
+		}
+	}
+}
+
 // assignWireGuardPorts разводит UDP-порты клиентских сетей. Конфликт с
 // туннелем на том же узле (он тоже слушает UDP) или с другим инбаундом — не
 // повод отказывать в создании инбаунда: порт просто сдвигается на свободный,
@@ -136,11 +164,28 @@ func (s *State) assignTunnelAddresses() {
 	}
 	for _, c := range s.Clients {
 		for _, p := range c.WireGuard {
-			if ip := net.ParseIP(p.Address); ip != nil {
-				if v4 := ip.To4(); v4 != nil {
-					taken[v4[3]] = true
-				}
+			peerPrefix, err := netip.ParsePrefix(p.Address)
+			if err != nil || !peerPrefix.Addr().Is4() {
+				continue
 			}
+			ip := net.IP(peerPrefix.Addr().AsSlice())
+			if ipnet.Contains(ip) {
+				taken[ip[3]] = true
+			}
+		}
+	}
+	// Уже выданные адреса туннелей тоже заняты. Иначе второй туннель,
+	// добавленный к существующему состоянию, снова получит .200/.250.
+	for _, t := range s.Tunnels {
+		if t.Kind != TunnelWG && t.Kind != TunnelWGReverse {
+			continue
+		}
+		for _, address := range []string{t.FromAddr, t.ToAddr} {
+			ip := net.ParseIP(address)
+			if ip == nil || ip.To4() == nil || !ipnet.Contains(ip) {
+				continue
+			}
+			taken[ip.To4()[3]] = true
 		}
 	}
 	next := func(from int) byte {

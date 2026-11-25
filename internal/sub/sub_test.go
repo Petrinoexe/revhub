@@ -25,6 +25,29 @@ func TestLinksContainRealityParams(t *testing.T) {
 	}
 }
 
+func TestTLSLinkUsesCertificateName(t *testing.T) {
+	st := model.Demo()
+	in := &st.Inbounds[0]
+	in.Security, in.CertSource, in.Domain, in.IP = "tls", "acme", "vpn.example.com", ""
+	in.SNI = ""
+	st.Nodes[0].PublicAddr = "203.0.113.9:443"
+	links := Links(st, st.Clients[0])
+	if len(links) != 1 || !strings.Contains(links[0], "sni=vpn.example.com") {
+		t.Fatalf("клиент не получил имя TLS-сертификата: %v", links)
+	}
+}
+
+func TestSelfSignedSourceDisablesCAValidation(t *testing.T) {
+	st := model.Demo()
+	in := &st.Inbounds[0]
+	in.Security, in.CertSource, in.Domain, in.IP = "tls", "selfsigned", "", "203.0.113.9"
+	in.SNI, in.SelfSigned = "", false
+	links := Links(st, st.Clients[0])
+	if len(links) != 1 || !strings.Contains(links[0], "allowInsecure=1") || !strings.Contains(links[0], "sni=203.0.113.9") {
+		t.Fatalf("selfsigned-ссылка неполна: %v", links)
+	}
+}
+
 func TestDisabledClientGetsNothing(t *testing.T) {
 	st := model.Demo()
 	st.Clients[0].Enabled = false

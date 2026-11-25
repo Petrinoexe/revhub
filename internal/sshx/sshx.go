@@ -159,6 +159,9 @@ func (c *Client) Exists(path string) bool {
 	return err == nil
 }
 
+// ShellQuote экранирует один аргумент для POSIX shell удалённого узла.
+func ShellQuote(s string) string { return shellQuote(s) }
+
 func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }

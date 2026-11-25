@@ -120,6 +120,19 @@ func TestWireGuardConfigEndpointMatchesLink(t *testing.T) {
 	}
 }
 
+func TestWireGuardLinkAndConfigShareInternalDNS(t *testing.T) {
+	st := wgState()
+	st.DNS = &model.DNSConfig{Root: "vpn.internal", NodeID: "hub"}
+	links := Links(st, st.Clients[0])
+	if len(links) != 1 || !strings.Contains(links[0], "dns=10.88.0.1") {
+		t.Fatalf("ссылка не получила внутренний DNS: %v", links)
+	}
+	conf := WireGuardConfigs(st, st.Clients[0])[0].Text
+	if !strings.Contains(conf, "DNS = 10.88.0.1\n") {
+		t.Fatalf("конфиг и ссылка разошлись по DNS:\n%s", conf)
+	}
+}
+
 func TestWireGuardConfigDNSOverride(t *testing.T) {
 	st := wgState()
 	st.Inbounds[0].WireGuard.DNS = "9.9.9.9"

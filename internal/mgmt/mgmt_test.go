@@ -20,7 +20,7 @@ func TestAddrsPrefersTunnel(t *testing.T) {
 	if len(addrs) != 2 {
 		t.Fatalf("адреса = %v", addrs)
 	}
-	if addrs[0] != "10.77.1.2:22" {
+	if addrs[0] != "10.88.0.250:22" {
 		t.Errorf("первым должен идти адрес в туннеле, получено %v", addrs)
 	}
 	if addrs[1] != "eu.example.com:22" {
@@ -47,7 +47,7 @@ func TestAddrsHonoursSSHPort(t *testing.T) {
 	st := model.Demo()
 	st.Nodes[1].SSHAddr = "eu.example.com:2222"
 	addrs := Addrs(st, st.Nodes[1])
-	if addrs[0] != "10.77.1.2:2222" {
+	if addrs[0] != "10.88.0.250:2222" {
 		t.Errorf("порт SSH не подхвачен: %v", addrs)
 	}
 }

@@ -24,8 +24,9 @@ func Addrs(st model.State, node model.Node) []string {
 		if t.Kind != model.TunnelWG && t.Kind != model.TunnelWGReverse {
 			continue
 		}
-		// адрес той стороны туннеля, где живёт узел (to = .2)
-		toAddr, err := tunnelAddr(t.Subnet, true)
+		// Адрес той стороны, где живёт узел: сначала явные FromAddr/ToAddr,
+		// а для старого состояния Addrs сам развернёт прежнюю /30.
+		_, toAddr, err := t.Addrs()
 		if err != nil {
 			continue
 		}
@@ -41,11 +42,14 @@ func Addrs(st model.State, node model.Node) []string {
 
 // TunnelAddrFor отдаёт адрес конца туннеля на стороне узла (для отчётов).
 func TunnelAddrFor(t model.Tunnel, toSide bool) string {
-	a, err := tunnelAddr(t.Subnet, toSide)
+	from, to, err := t.Addrs()
 	if err != nil {
 		return ""
 	}
-	return a
+	if toSide {
+		return to
+	}
+	return from
 }
 
 // Probe проверяет, что на адресе действительно SSH: TCP-коннект сам по себе
@@ -85,26 +89,6 @@ func hostOnly(s string) string {
 		return h
 	}
 	return s
-}
-
-// tunnelAddr считает адрес конца туннеля из подсети /30: .1 — from, .2 — to.
-func tunnelAddr(subnet string, toSide bool) (string, error) {
-	_, ipnet, err := net.ParseCIDR(subnet)
-	if err != nil {
-		return "", err
-	}
-	base := ipnet.IP.To4()
-	if base == nil {
-		return "", err
-	}
-	a := make(net.IP, 4)
-	copy(a, base)
-	if toSide {
-		a[3] += 2
-	} else {
-		a[3]++
-	}
-	return a.String(), nil
 }
 
 func dedupe(in []string) []string {

@@ -46,6 +46,16 @@ func WireGuardConfigs(st model.State, c model.Client) []Config {
 	return out
 }
 
+// wireGuardDNS — один резолвер и для wireguard://, и для скачанного .conf.
+func wireGuardDNS(st model.State, in model.Inbound) string {
+	if st.DNS != nil && st.DNS.Enabled() && st.DNS.NodeID == in.NodeID {
+		if addr := in.WireGuard.ServerAddress(); addr != "" {
+			return addr
+		}
+	}
+	return in.WireGuard.DNS
+}
+
 // wgConfigText — стандартный формат wg-quick: клиент дозванивается до узла,
 // серверный адрес берётся из инбаунда, ключи — из пары клиента. Весь трафик
 // (0.0.0.0/0) уходит в туннель, keepalive держит NAT-сессию живой.
@@ -55,14 +65,8 @@ func wgConfigText(st model.State, c model.Client, in model.Inbound, node model.N
 	b.WriteString("[Interface]\n")
 	fmt.Fprintf(&b, "PrivateKey = %s\n", peer.PrivateKey)
 	fmt.Fprintf(&b, "Address = %s\n", peer.Address)
-	// Зона DNS живёт на адресе интерфейса (dnsmasq слушает 10.88.0.1): если
-	// она включена, клиент должен спрашивать именно его, а не внешний резолвер.
-	dns := in.WireGuard.DNS
-	if st.DNS != nil && st.DNS.Enabled() && st.DNS.NodeID == in.NodeID {
-		if addr := in.WireGuard.ServerAddress(); addr != "" {
-			dns = addr
-		}
-	}
+	// Зона DNS живёт на адресе интерфейса (dnsmasq слушает 10.88.0.1).
+	dns := wireGuardDNS(st, in)
 	if dns != "" {
 		fmt.Fprintf(&b, "DNS = %s\n", dns)
 	}

@@ -156,9 +156,10 @@ func TestBootstrapFullFlow(t *testing.T) {
 
 type acmeDirRunner struct {
 	*fakeRunner
-	dir         string
-	created     bool
-	skipRenewal bool
+	dir          string
+	created      bool
+	skipRenewal  bool
+	downloadACME bool
 }
 
 func (r *acmeDirRunner) Run(cmd string) (string, error) {
@@ -180,6 +181,12 @@ func (r *acmeDirRunner) Run(cmd string) (string, error) {
 			return "Skipping. Next renewal time", nil
 		}
 		return "Skipping. Next renewal time", fmt.Errorf("exit status 2")
+	}
+	if r.downloadACME && strings.HasPrefix(cmd, "test -x /root/.acme.sh/acme.sh") {
+		return "", fmt.Errorf("missing")
+	}
+	if r.downloadACME && strings.HasPrefix(cmd, "curl -sSL https://get.acme.sh") {
+		return "", nil
 	}
 	if strings.HasPrefix(cmd, "test -x /root/.acme.sh/acme.sh") || strings.Contains(cmd, "--issue -d") || strings.Contains(cmd, "--set-default-ca") {
 		return "", nil
@@ -220,6 +227,54 @@ func TestBootstrapACMERetryAfterRenewSkip(t *testing.T) {
 	}
 	if !r.created {
 		t.Fatal("certificate was not installed")
+	}
+}
+
+type recordingRunner struct {
+	Runner
+	cmds []string
+}
+
+func (r *recordingRunner) Run(cmd string) (string, error) {
+	r.cmds = append(r.cmds, cmd)
+	return r.Runner.Run(cmd)
+}
+
+func TestBootstrapACMEQuotesArguments(t *testing.T) {
+	base := &acmeDirRunner{fakeRunner: newFakeRunner(), dir: "/etc/revhub/tls", downloadACME: true}
+	r := &recordingRunner{Runner: base}
+	p := planFor(t)
+	p.ACMEDomain = "vpn.example.com; touch /tmp/revhub-pwned"
+	p.ACMEEmail = "admin@example.com; touch /tmp/revhub-mail"
+	p.ACMEDNS = "dns_cf; touch /tmp/revhub-dns"
+	_, err := RunWith(func(sshx.Target) (Runner, error) { return r, nil }, sshx.Target{Addr: "test"}, p, nil)
+	if err != nil {
+		t.Fatalf("bootstrap: %v", err)
+	}
+	joined := strings.Join(r.cmds, "\n")
+	for _, want := range []string{
+		"-d 'vpn.example.com; touch /tmp/revhub-pwned'",
+		"email='admin@example.com; touch /tmp/revhub-mail'",
+		"--dns 'dns_cf; touch /tmp/revhub-dns'",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("аргумент не экранирован: %q\n%s", want, joined)
+		}
+	}
+}
+
+func TestBootstrapACMEIPQuotesEmail(t *testing.T) {
+	base := &acmeDirRunner{fakeRunner: newFakeRunner(), dir: "/etc/revhub/tls/ip", downloadACME: true}
+	r := &recordingRunner{Runner: base}
+	p := planFor(t)
+	p.ACMEIP = "198.51.100.1"
+	p.ACMEEmail = "admin@example.com; touch /tmp/revhub-mail"
+	_, err := RunWith(func(sshx.Target) (Runner, error) { return r, nil }, sshx.Target{Addr: "test"}, p, nil)
+	if err != nil {
+		t.Fatalf("bootstrap: %v", err)
+	}
+	if got := strings.Join(r.cmds, "\n"); !strings.Contains(got, "email='admin@example.com; touch /tmp/revhub-mail'") {
+		t.Fatalf("email не экранирован:\n%s", got)
 	}
 }
 

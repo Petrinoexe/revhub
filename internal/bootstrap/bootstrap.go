@@ -261,13 +261,13 @@ func RunWith(open Open, t sshx.Target, p Plan, logf func(string)) (*Result, erro
 				return "уже выпущен", nil
 			}
 			if _, err := cli.Run("test -x /root/.acme.sh/acme.sh"); err != nil {
-				if _, err := cli.Run("curl -sSL https://get.acme.sh | sh -s email=" + p.ACMEEmail); err != nil {
+				if _, err := cli.Run("curl -sSL https://get.acme.sh | sh -s email=" + sshx.ShellQuote(p.ACMEEmail)); err != nil {
 					return "", fmt.Errorf("acme.sh не установился: %w", err)
 				}
 			}
-			issue := "/root/.acme.sh/acme.sh --issue -d " + p.ACMEDomain + " --keylength ec-256 --server letsencrypt"
+			issue := "/root/.acme.sh/acme.sh --issue -d " + sshx.ShellQuote(p.ACMEDomain) + " --keylength ec-256 --server letsencrypt"
 			if p.ACMEDNS != "" {
-				issue += " --dns " + p.ACMEDNS
+				issue += " --dns " + sshx.ShellQuote(p.ACMEDNS)
 			} else {
 				issue += " --standalone"
 			}
@@ -277,7 +277,7 @@ func RunWith(open Open, t sshx.Target, p Plan, logf func(string)) (*Result, erro
 			if _, err := cli.Run("mkdir -p /etc/revhub/tls"); err != nil {
 				return "", fmt.Errorf("создание каталога сертификата: %w", err)
 			}
-			install := "/root/.acme.sh/acme.sh --install-cert -d " + p.ACMEDomain + " --ecc " +
+			install := "/root/.acme.sh/acme.sh --install-cert -d " + sshx.ShellQuote(p.ACMEDomain) + " --ecc " +
 				"--fullchain-file /etc/revhub/tls/fullchain.pem --key-file /etc/revhub/tls/key.pem " +
 				"--reloadcmd 'systemctl restart xray || true'"
 			if _, err := cli.Run(install); err != nil {
@@ -305,7 +305,7 @@ func RunWith(open Open, t sshx.Target, p Plan, logf func(string)) (*Result, erro
 				}
 			}
 			if _, err := cli.Run("test -x /root/.acme.sh/acme.sh"); err != nil {
-				if _, err := cli.Run("curl -sSL https://get.acme.sh | sh -s email=" + p.ACMEEmail); err != nil {
+				if _, err := cli.Run("curl -sSL https://get.acme.sh | sh -s email=" + sshx.ShellQuote(p.ACMEEmail)); err != nil {
 					return "", fmt.Errorf("acme.sh не установился: %w", err)
 				}
 			}

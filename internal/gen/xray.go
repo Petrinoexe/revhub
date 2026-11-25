@@ -123,7 +123,7 @@ func apiInbound() map[string]any {
 func buildInbound(st model.State, in model.Inbound) (map[string]any, error) {
 	clients := []any{}
 	for _, c := range st.Clients {
-		if !c.Enabled || !contains(c.Inbounds, in.ID) {
+		if !c.Enabled || c.Expired() || !contains(c.Inbounds, in.ID) {
 			continue
 		}
 		cl := map[string]any{"id": c.UUID, "email": c.Email}
@@ -139,10 +139,8 @@ func buildInbound(st model.State, in model.Inbound) (map[string]any, error) {
 
 	sni, cert, key := in.SNI, in.CertFile, in.KeyFile
 	if in.Security == "tls" {
-		sni, cert, key = tlsResolve(in.CertSource, in.Domain, in.IP, in.CertFile, in.KeyFile)
-		if in.SNI != "" {
-			sni = in.SNI
-		}
+		_, cert, key = tlsResolve(in.CertSource, in.Domain, in.IP, in.CertFile, in.KeyFile)
+		sni = in.EffectiveSNI()
 	}
 	stream, err := streamSettings(streamOpts{
 		Transport: in.Transport, Security: in.Security, SNI: sni, Dest: in.Dest,
