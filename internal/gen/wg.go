@@ -650,15 +650,29 @@ fi
 		// wg-quick down может не снять интерфейс (нет секции PostDown, битый
 		// файл): тогда up упадёт на «Address already in use». После down
 		// проверяем и добиваем интерфейс руками.
+		//
+		// Юнит wg-quick@<имя> тоже может держать интерфейс (он enabled и мог
+		// быть запущен systemd): пока он активен, наш up воюет с ним за адрес.
+		// Гасим юнит, поднимаем сами, а если не вышло — печатаем состояние
+		// сети, иначе причина снова будет невидимой.
 		fmt.Fprintf(&b, "if ! cmp -s %q /etc/wireguard/%q || ! ip link show dev %q >/dev/null 2>&1; then\n"+
+			"  if [ -d /run/systemd/system ]; then systemctl stop %q >/dev/null 2>&1 || true; fi\n"+
 			"  if ip link show dev %q >/dev/null 2>&1; then\n"+
 			"    wg-quick down %q >/dev/null 2>&1 || true\n"+
 			"    if ip link show dev %q >/dev/null 2>&1; then ip link delete dev %q 2>/dev/null || true; fi\n"+
 			"  fi\n"+
 			"  install -m 600 %q /etc/wireguard/%q\n"+
-			"  wg-quick up %q\n"+
+			"  if ! wg-quick up %q; then\n"+
+			"    echo \"[revhub] интерфейс %q не поднялся; состояние сети:\" >&2\n"+
+			"    ip -4 -o addr show >&2 || true\n"+
+			"    ip route show table all 2>/dev/null | grep -F \"$(sed -n 's/^Address = //p' %q | head -n1 | cut -d/ -f1)\" >&2 || true\n"+
+			"    wg show interfaces >&2 || true\n"+
+			"    grep -n '^Address\\|^ListenPort' /etc/wireguard/%q >&2 || true\n"+
+			"    exit 1\n"+
+			"  fi\n"+
 			"fi\n",
-			f, f, name, name, name, name, name, f, f, name)
+			f, f, name, "wg-quick@"+name+".service", name, name, name, name,
+			f, f, name, name, f, f)
 		// Интерфейс должен подниматься после перезагрузки: apply.sh запускается
 		// один раз, а systemd поднимет wg-quick@<имя> сам.
 		fmt.Fprintf(&b, "if [ -d /run/systemd/system ]; then systemctl enable %q >/dev/null 2>&1 || true; fi\n",
