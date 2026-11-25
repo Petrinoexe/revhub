@@ -143,10 +143,51 @@ func TestClientWGConfTunnelEgress(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(conf, "ip rule add from 10.88.0.0/24 lookup 300 pref 32000") {
-		t.Errorf("нет маршрута в туннель:\n%s", conf)
+	// По входному интерфейсу, а не по адресу источника: `from` увёл бы в
+	// туннель и собственный трафик узла с адреса 10.88.0.1.
+	if !strings.Contains(conf, "ip rule add iif %i lookup 300 pref 32000") {
+		t.Errorf("нет маршрута в туннель по входному интерфейсу:\n%s", conf)
+	}
+	if strings.Contains(conf, "ip rule add from") {
+		t.Error("правило по источнику перехватывает трафик самого узла")
+	}
+	// Пир-пир должен остаться в своей сети: в таблице туннеля нужен маршрут
+	// на подсеть через %i, иначе клиент-клиент уедет в туннель.
+	if !strings.Contains(conf, "ip -4 route replace 10.88.0.0/24 dev %i table 300") {
+		t.Errorf("нет маршрута на клиентскую сеть в таблице туннеля:\n%s", conf)
 	}
 	if strings.Contains(conf, "masquerade") {
 		t.Error("при выходе в туннель NAT делает выходной узел, не хаб")
+	}
+}
+
+// Выходной узел туннеля обязан NAT'ить и подсети клиентов: иначе их пакеты
+// уходят наружу с приватным адресом и ответ не возвращается. И принимать их
+// по AllowedIPs — source-фильтр WireGuard отбросит чужие адреса.
+func TestTunnelExitNatCoversClients(t *testing.T) {
+	st := clientNetState()
+	st.Nodes = append(st.Nodes, model.Node{ID: "exit", Name: "Выход", PublicAddr: "eu.example.com"})
+	st.Tunnels = []model.Tunnel{{
+		ID: "t1", Name: "eu", Kind: model.TunnelWG, Enabled: true,
+		FromNode: "hub", ToNode: "exit", Subnet: "10.77.1.0/30", ListenPort: 51900,
+		Mark: 300, ForwardPolicy: true,
+		FromKeyPriv: zeroKey, FromKeyPub: zeroKey, ToKeyPriv: zeroKey, ToKeyPub: zeroKey,
+	}}
+	st.Inbounds[0].Egress = "tun:eu"
+	st.Normalize()
+	exit := st.Tunnels[0]
+	conf, err := WGConfig(st, exit, "exit")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"ip saddr { 10.77.1.1/32, 10.88.0.0/24 }",
+		"AllowedIPs = 10.77.1.1/32, 10.88.0.0/24",
+		"iptables -I FORWARD -i %i -j ACCEPT",
+		"ip -4 route replace 10.88.0.0/24 dev %i",
+	} {
+		if !strings.Contains(conf, want) {
+			t.Errorf("в конфиге выхода нет %q:\n%s", want, conf)
+		}
 	}
 }

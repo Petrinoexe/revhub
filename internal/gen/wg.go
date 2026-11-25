@@ -260,8 +260,16 @@ func ClientWGConf(st model.State, in model.Inbound, nodeID string) (string, erro
 		if !ok || t.FromNode != nodeID {
 			return "", fmt.Errorf("нет включённого туннеля %s на узле %s", name, nodeID)
 		}
-		fmt.Fprintf(&b, "PostUp = ip rule add from %s lookup %d pref 32000\n", wg.Subnet, t.Mark)
-		fmt.Fprintf(&b, "PostDown = ip rule del from %s lookup %d pref 32000 2>/dev/null || true\n", wg.Subnet, t.Mark)
+		// Правило по входному интерфейсу, а не по адресу источника: `from
+		// 10.88.0.0/24` перехватывало бы и собственный трафик узла (dnsmasq
+		// отвечает с адреса этого же интерфейса) и уводило его в туннель.
+		// Пир-пир остаётся в своей сети: в таблице туннеля сначала ищется
+		// маршрут на подсеть через %i, и только остальное попадает в default.
+		fmt.Fprintf(&b, "PostUp = ip -4 route replace %s dev %%i table %d\n", wg.Subnet, t.Mark)
+		fmt.Fprintf(&b, "PostDown = ip -4 route del %s dev %%i table %d 2>/dev/null || true\n", wg.Subnet, t.Mark)
+		fmt.Fprintf(&b, "PostUp = ip rule del iif %%i lookup %d 2>/dev/null || true; ip rule add iif %%i lookup %d pref 32000\n",
+			t.Mark, t.Mark)
+		fmt.Fprintf(&b, "PostDown = ip rule del iif %%i lookup %d 2>/dev/null || true\n", t.Mark)
 	default:
 		// Общий выход в интернет: NAT наружу, но не между пирами.
 		nat := []string{
@@ -414,7 +422,7 @@ func WGConfig(st model.State, t model.Tunnel, nodeID string) (string, error) {
 		fmt.Fprintf(&b, "PostDown = ip -4 route flush table %d 2>/dev/null || true\n", t.Mark)
 	}
 	if !isFrom && t.ForwardPolicy {
-		if err := writeNAT(&b, t, fromAddr); err != nil {
+		if err := writeNAT(&b, t, fromAddr, egressSubnets(st, t)); err != nil {
 			return "", err
 		}
 	}
@@ -443,7 +451,12 @@ func WGConfig(st model.State, t model.Tunnel, nodeID string) (string, error) {
 	if isFrom {
 		b.WriteString("AllowedIPs = 0.0.0.0/0\n")
 	} else {
-		fmt.Fprintf(&b, "AllowedIPs = %s/32\n", fromAddr)
+		// Обратный путь: кроме адреса дальнего конца принимаем подсети
+		// клиентских сетей, которые выпускаются через этот туннель. WireGuard
+		// фильтрует источник по AllowedIPs и молча выбрасывает пакеты с чужим
+		// адресом — без этого выход не видит клиентов вовсе.
+		parts := append([]string{fromAddr + "/32"}, egressSubnets(st, t)...)
+		fmt.Fprintf(&b, "AllowedIPs = %s\n", strings.Join(parts, ", "))
 	}
 	return b.String(), nil
 }
@@ -453,12 +466,24 @@ func mustNode(st model.State, id string) model.Node {
 	return n
 }
 
-func writeNAT(b *strings.Builder, t model.Tunnel, fromAddr string) error {
+// writeNAT включает форвардинг и NAT на выходном узле туннеля. Источники —
+// адрес дальнего конца туннеля и подсети клиентских сетей, которые через этот
+// туннель выпускаются: без них трафик клиентов уходил бы наружу с приватным
+// адресом 10.88.0.x и не возвращался.
+func writeNAT(b *strings.Builder, t model.Tunnel, fromAddr string, clients []string) error {
 	sum := sha256.Sum256([]byte(t.WGInterface()))
 	table := fmt.Sprintf("revhub_%x", sum[:6])
-	selector := `iifname "%i" ip saddr ` + fromAddr + `/32 oifname != "%i"`
-	// iptables POSTROUTING cannot match the input interface.
-	legacy := "-s " + fromAddr + "/32 ! -o %i"
+	srcs := []string{fromAddr + "/32"}
+	for _, c := range clients {
+		if c != "" && c != fromAddr+"/32" {
+			srcs = append(srcs, c)
+		}
+	}
+	selector := `iifname "%i" ip saddr { ` + strings.Join(srcs, ", ") + ` } oifname != "%i"`
+	var legacy []string
+	for _, s := range srcs {
+		legacy = append(legacy, "-s "+s+" ! -o %i")
+	}
 	if iface := t.EgressIface; iface != "" {
 		if len(iface) > 15 || strings.ContainsFunc(iface, func(c rune) bool {
 			return !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || strings.ContainsRune("_=+.-", c))
@@ -466,15 +491,61 @@ func writeNAT(b *strings.Builder, t model.Tunnel, fromAddr string) error {
 			return fmt.Errorf("некорректное имя выходного интерфейса %q", iface)
 		}
 		fmt.Fprintf(b, "PostUp = ip link show dev %q >/dev/null\n", iface)
-		selector = `iifname "%i" ip saddr ` + fromAddr + "/32 oifname " + strconv.Quote(iface)
-		legacy = "-s " + fromAddr + "/32 -o " + iface
+		selector = `iifname "%i" ip saddr { ` + strings.Join(srcs, ", ") + ` } oifname ` + strconv.Quote(iface)
+		legacy = nil
+		for _, s := range srcs {
+			legacy = append(legacy, "-s "+s+" -o "+iface)
+		}
 	}
 	b.WriteString("PostUp = sysctl -q -w net.ipv4.ip_forward=1\n")
+	// Обратный маршрут к клиентским сетям через туннель: без него строгий
+	// rp_filter выбрасывает пакеты с чужим адресом источника, а ответы не
+	// находят дорогу назад. Table = off, поэтому маршрут ставим сами.
+	for _, c := range clients {
+		fmt.Fprintf(b, "PostUp = ip -4 route replace %s dev %%i\n", c)
+		fmt.Fprintf(b, "PostDown = ip -4 route del %s dev %%i 2>/dev/null || true\n", c)
+	}
+	b.WriteString("PostUp = printf '2\\n' > /proc/sys/net/ipv4/conf/%i/rp_filter\n")
+	// Пакеты клиентов приходят в туннель и уходят наружу — это форвардинг.
+	// ufw и docker держат в filter/FORWARD политику drop, поэтому разрешаем
+	// явно, в общей цепочке: приватная таблица чужой drop не отменяет.
+	b.WriteString("PostUp = iptables -I FORWARD -i %i -j ACCEPT\n")
+	b.WriteString("PostUp = iptables -I FORWARD -o %i -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT\n")
+	b.WriteString("PostDown = iptables -D FORWARD -i %i -j ACCEPT 2>/dev/null || true\n")
+	b.WriteString("PostDown = iptables -D FORWARD -o %i -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true\n")
 	// Create a separate table so nftables works even on a fresh exit node.
-	fmt.Fprintf(b, "PostUp = if command -v nft >/dev/null; then printf '%%s\\n' 'add table ip %s' 'add chain ip %s postrouting { type nat hook postrouting priority srcnat; }' 'add rule ip %s postrouting %s masquerade' | nft -f -; else iptables -t nat -A POSTROUTING %s -j MASQUERADE; fi\n",
-		table, table, table, selector, legacy)
-	fmt.Fprintf(b, "PostDown = if command -v nft >/dev/null; then nft delete table ip %s; else iptables -t nat -D POSTROUTING %s -j MASQUERADE; fi\n", table, legacy)
+	fallbackUp := make([]string, len(legacy))
+	fallbackDown := make([]string, len(legacy))
+	for i, rule := range legacy {
+		fallbackUp[i] = "iptables -t nat -I POSTROUTING " + rule + " -j MASQUERADE"
+		fallbackDown[i] = "iptables -t nat -D POSTROUTING " + rule + " -j MASQUERADE 2>/dev/null || true"
+	}
+	fmt.Fprintf(b, "PostUp = if command -v nft >/dev/null; then printf '%%s\\n' 'add table ip %s' 'add chain ip %s postrouting { type nat hook postrouting priority srcnat; }' 'add rule ip %s postrouting %s masquerade' | nft -f -; else %s; fi\n",
+		table, table, table, selector, strings.Join(fallbackUp, "; "))
+	fmt.Fprintf(b, "PostDown = if command -v nft >/dev/null; then nft delete table ip %s; else %s; fi\n",
+		table, strings.Join(fallbackDown, "; "))
 	return nil
+}
+
+// egressSubnets — подсети клиентских сетей, которые выпускаются через туннель.
+func egressSubnets(st model.State, t model.Tunnel) []string {
+	var out []string
+	seen := map[string]bool{}
+	for _, in := range st.Inbounds {
+		if !in.Enabled || in.Kind != model.InboundWireGuard || in.NodeID != t.FromNode {
+			continue
+		}
+		if in.Egress != model.TagTunnel+t.Name || in.WireGuard == nil {
+			continue
+		}
+		s := in.WireGuard.Subnet
+		if s == "" || seen[s] {
+			continue
+		}
+		seen[s] = true
+		out = append(out, s)
+	}
+	return out
 }
 
 // hostOnly отрезает порт от "host:port"; для IPv6 в скобках сохраняет адрес.
