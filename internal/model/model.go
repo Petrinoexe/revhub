@@ -491,6 +491,7 @@ func (s *State) Normalize() {
 			c.SubToken = GenToken()
 		}
 	}
+	s.assignWireGuardPorts()
 	s.normalizeWireGuardPeers()
 	s.normalizeDNSHostnames()
 	s.normalizeDNS()

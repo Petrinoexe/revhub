@@ -65,6 +65,51 @@ func (s State) SharedSubnet() string {
 	return DefaultWireGuardSubnet
 }
 
+// assignWireGuardPorts разводит UDP-порты клиентских сетей. Конфликт с
+// туннелем на том же узле (он тоже слушает UDP) или с другим инбаундом — не
+// повод отказывать в создании инбаунда: порт просто сдвигается на свободный,
+// а панель покажет его после сохранения.
+func (s *State) assignWireGuardPorts() {
+	taken := map[string]map[int]bool{}
+	mark := func(node string, port int) {
+		if node == "" || port <= 0 {
+			return
+		}
+		if taken[node] == nil {
+			taken[node] = map[int]bool{}
+		}
+		taken[node][port] = true
+	}
+	for _, t := range s.Tunnels {
+		if !t.Enabled || (t.Kind != TunnelWG && t.Kind != TunnelWGReverse) {
+			continue
+		}
+		mark(t.ListenerNode(), t.ListenPort)
+	}
+	for i := range s.Inbounds {
+		in := &s.Inbounds[i]
+		if in.Kind != InboundWireGuard {
+			continue
+		}
+		ports := taken[in.NodeID]
+		if ports == nil {
+			ports = map[int]bool{}
+			taken[in.NodeID] = ports
+		}
+		if in.Port > 0 && !ports[in.Port] {
+			ports[in.Port] = true
+			continue
+		}
+		for p := 51820; p < 65535; p++ {
+			if !ports[p] {
+				ports[p] = true
+				in.Port = p
+				break
+			}
+		}
+	}
+}
+
 // assignTunnelAddresses раскладывает концы туннелей по общей сети: хаб .200+,
 // выходы .250+. Отдельная /30 больше не нужна: маршруты и правила считаются
 // по одной сети, а адрес выхода — обычный адрес в ней (к нему и маршрутят

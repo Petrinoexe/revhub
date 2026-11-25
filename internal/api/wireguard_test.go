@@ -16,7 +16,9 @@ import (
 	"revhub/internal/store"
 )
 
-func TestWireGuardRejectsConflictingTunnelPort(t *testing.T) {
+// Порт, занятый туннелем на том же узле, не должен мешать создать инбаунд:
+// он сдвигается на свободный, а состояние остаётся валидным.
+func TestWireGuardPortMovesOffTunnelPort(t *testing.T) {
 	st := model.Demo()
 	for _, tunnel := range st.Tunnels {
 		if !tunnel.Enabled || (tunnel.Kind != model.TunnelWG && tunnel.Kind != model.TunnelWGReverse) {
@@ -27,8 +29,11 @@ func TestWireGuardRejectsConflictingTunnelPort(t *testing.T) {
 			NodeID: tunnel.ListenerNode(), Port: tunnel.ListenPort,
 		})
 		st.Normalize()
-		if err := st.Validate(); err == nil || !strings.Contains(err.Error(), "UDP-порт") {
-			t.Fatalf("expected a UDP port conflict, got %v", err)
+		if err := st.Validate(); err != nil {
+			t.Fatalf("инбаунд должен создаваться: %v", err)
+		}
+		if got := st.Inbounds[len(st.Inbounds)-1].Port; got == tunnel.ListenPort {
+			t.Fatalf("порт остался занятым туннелем (%d)", got)
 		}
 		return
 	}

@@ -177,6 +177,24 @@ func TestAssignWireGuardSubnets(t *testing.T) {
 	}
 }
 
+// Инбаунд не должен «не создаваться» из-за занятого UDP-порта: если порт
+// занят туннелем на том же узле, он сдвигается на свободный.
+func TestWireGuardPortAutoShift(t *testing.T) {
+	st := Demo()
+	st.Inbounds = append(st.Inbounds, Inbound{
+		ID: "in-wg", NodeID: "hub", Tag: "wg", Kind: InboundWireGuard,
+		Listen: "0.0.0.0", Port: 51820, Enabled: true,
+	})
+	st.Clients[0].Inbounds = append(st.Clients[0].Inbounds, "in-wg")
+	st.Normalize()
+	if err := st.Validate(); err != nil {
+		t.Fatalf("инбаунд с занятым портом не должен ломать состояние: %v", err)
+	}
+	if got := st.Inbounds[1].Port; got == 51820 {
+		t.Errorf("порт остался %d, хотя его занимает туннель", got)
+	}
+}
+
 // Подсеть инбаунда не должна совпадать с подсетью туннеля на том же узле:
 // иначе оба интерфейса хотят один и тот же .1 и второй падает на старте.
 func TestWireGuardSubnetVsTunnel(t *testing.T) {
