@@ -273,6 +273,11 @@ func ClientWGConf(st model.State, in model.Inbound, nodeID string) (string, erro
 		fmt.Fprintf(&b, "PostDown = ip -4 route del %s dev %%i table %d 2>/dev/null || true\n", wg.Subnet, t.Mark)
 		fmt.Fprintf(&b, "PostUp = ip rule del iif %%i lookup %d 2>/dev/null || true; ip rule add iif %%i lookup %d pref 32000\n",
 			t.Mark, t.Mark)
+		// Пустая таблица = правило промахивается и трафик уходит напрямую
+		// (ядро продолжает поиск по следующему правилу). Молчать об этом
+		// нельзя: снаружи выглядит как «в туннель не хочет идти».
+		fmt.Fprintf(&b, "PostUp = ip -4 route show table %d default | grep -q . || echo \"[revhub] таблица %d без default: туннель %s не поднят, клиенты пойдут напрямую\" >&2\n",
+			t.Mark, t.Mark, name)
 		fmt.Fprintf(&b, "PostDown = ip rule del iif %%i lookup %d 2>/dev/null || true\n", t.Mark)
 	default:
 		// Общий выход в интернет: NAT наружу, но не между пирами.
@@ -420,14 +425,22 @@ func WGConfig(st model.State, t model.Tunnel, nodeID string) (string, error) {
 		// Плюс host-route до дальнего конца в main: по нему панель ходит на
 		// выходной по SSH через туннель, не задевая остальной трафик.
 		// PreUp — защита от тихого перехвата чужой таблицы: если в ней уже есть
-		// default (ручной wg0 на этой же машине), apply падает с объяснением,
-		// а не уводит чужой трафик в наш туннель.
-		fmt.Fprintf(&b, "PreUp = sh -c 'ip route show table %d 2>/dev/null | grep -q \"^default\" && { echo \"revhub: таблица %d уже занята другим default-маршрутом — смени метку туннеля\" >&2; exit 1; }; true'\n",
-			t.Mark, t.Mark)
+		// default от чужого интерфейса (ручной wg0 на этой же машине), apply
+		// падает с объяснением, а не уводит чужой трафик в наш туннель. Свой
+		// собственный застрявший default (остался после падения, когда PostDown
+		// не выполнился) снимаем — иначе туннель не поднимается уже никогда,
+		// а клиенты молча идут напрямую.
+		fmt.Fprintf(&b, "PreUp = sh -c 'r=$(ip -4 route show table %d default 2>/dev/null | head -n1); case \"$r\" in \"\") exit 0;; *\"dev %s\"*) ip -4 route flush table %d; echo \"[revhub] снят устаревший default из таблицы %d\";; *) echo \"[revhub] таблица %d занята чужим default ($r) — смени метку туннеля\" >&2; exit 1;; esac'\n",
+			t.Mark, t.WGInterface(), t.Mark, t.Mark, t.Mark)
 		fmt.Fprintf(&b, "PostUp = ip -4 route replace %s/32 dev %%i\n", toAddr)
 		fmt.Fprintf(&b, "PostDown = ip -4 route del %s/32 dev %%i 2>/dev/null || true\n", toAddr)
 		fmt.Fprintf(&b, "PostUp = ip rule add fwmark %d lookup %d 2>/dev/null || true\n", t.Mark, t.Mark)
 		fmt.Fprintf(&b, "PostUp = ip -4 route replace default dev %%i table %d\n", t.Mark)
+		// Проверка, что таблица действительно получила default: без него
+		// правило по iif на клиентском интерфейсе «промахивается» и трафик
+		// уходит напрямую — самый незаметный из возможных отказов.
+		fmt.Fprintf(&b, "PostUp = ip -4 route show table %d default | grep -q . || echo \"[revhub] в таблице %d нет default: туннель не маршрутизирует, клиенты пойдут напрямую\" >&2\n",
+			t.Mark, t.Mark)
 		// Replies arrive on WireGuard, while the unmarked reverse path uses the WAN.
 		b.WriteString("PostUp = " + soft("printf '2\\n' > /proc/sys/net/ipv4/conf/%i/rp_filter",
 			"rp_filter не сброшен в loose — часть пакетов может фильтроваться") + "\n")

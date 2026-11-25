@@ -161,6 +161,31 @@ func TestClientWGConfTunnelEgress(t *testing.T) {
 	}
 }
 
+// Застрявший default в таблице метки от нашей же прошлой попытки нельзя
+// принимать за чужой: иначе туннель не поднимается никогда, а клиенты молча
+// уходят напрямую. Чужой default (ручной wg0) по-прежнему повод отказаться.
+func TestTunnelPreUpDistinguishesOwnDefault(t *testing.T) {
+	st := clientNetState()
+	st.Tunnels = []model.Tunnel{{
+		ID: "t1", Name: "eu", Kind: model.TunnelWG, Enabled: true,
+		FromNode: "hub", ToNode: "hub", Subnet: "10.77.1.0/30", ListenPort: 51900, Mark: 300,
+		FromKeyPriv: zeroKey, FromKeyPub: zeroKey, ToKeyPriv: zeroKey, ToKeyPub: zeroKey,
+	}}
+	st.Normalize()
+	conf, err := WGConfig(st, st.Tunnels[0], "hub")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"снят устаревший default", "чужим default", `dev ` + st.Tunnels[0].WGInterface()} {
+		if !strings.Contains(conf, want) {
+			t.Errorf("в PreUp нет %q:\n%s", want, conf)
+		}
+	}
+	if !strings.Contains(conf, "ip -4 route replace default dev %i table 300") {
+		t.Error("нет default-маршрута в таблице метки")
+	}
+}
+
 // Выходной узел туннеля обязан NAT'ить и подсети клиентов: иначе их пакеты
 // уходят наружу с приватным адресом и ответ не возвращается. И принимать их
 // по AllowedIPs — source-фильтр WireGuard отбросит чужие адреса.

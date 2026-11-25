@@ -390,6 +390,10 @@ function egressPanelHTML(){
         <select onchange="setEgress(${i},this.value)">${opts.join('')}</select></div>
     </div>`;
     if(!known) html += `<div class="hint">⚠ туннель «${esc(cur.slice(4))}» не найден на узле ${esc(node)} — маршрут не соберётся, выберите другой выход.</div>`;
+    const t = tuns.find(x=>'tun:'+x.name===cur);
+    // Без NAT на выходном узле пакеты уходят в интернет с адресом 10.88.0.x и
+    // не возвращаются: снаружи это «в туннель не идёт», хотя маршрут есть.
+    if(t && !t.forward_policy) html += `<div class="hint">⚠ у туннеля «${esc(t.name)}» выключен «NAT на выходном узле» — трафик уйдёт в интернет с приватным адресом и не вернётся. Включите его в карточке туннеля.</div>`;
     if(cur!=='direct' && tuns.length && !r.enabled) html += `<div class="hint">инбаунд выключен — маршрут не применяется.</div>`;
     if(cur==='direct' && !tuns.length && (ST.tunnels||[]).length) html += `<div class="hint">на этом узле нет включённого туннеля, начинающегося здесь;
       чтобы выпускать клиентов через выходной узел, создайте туннель с началом на ${esc(node)}.</div>`;
