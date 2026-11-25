@@ -662,17 +662,28 @@ fi
 			"    if ip link show dev %q >/dev/null 2>&1; then ip link delete dev %q 2>/dev/null || true; fi\n"+
 			"  fi\n"+
 			"  install -m 600 %q /etc/wireguard/%q\n"+
+			// Ядро биндит UDP-порт WG-устройства в момент `ip link set up`:
+			// если порт занят (свой wg0, другой интерфейс, служба), up падает
+			// с «Address already in use», хотя адрес интерфейса свободен.
+			"  lport=$(sed -n 's/^ListenPort = //p' /etc/wireguard/%q | head -n1)\n"+
+			"  if [ -n \"$lport\" ] && ss -lunH \"sport = :$lport\" 2>/dev/null | grep -q .; then\n"+
+			"    echo \"[revhub] UDP-порт $lport (конфиг '%q') уже слушает:\" >&2\n"+
+			"    ss -lunp \"sport = :$lport\" >&2 || true\n"+
+			"    echo \"[revhub] это другой туннель или служба — задай инбаунду свободный порт\" >&2\n"+
+			"    exit 1\n"+
+			"  fi\n"+
 			"  if ! wg-quick up %q; then\n"+
 			"    echo \"[revhub] интерфейс %q не поднялся; состояние сети:\" >&2\n"+
 			"    ip -4 -o addr show >&2 || true\n"+
 			"    ip route show table all 2>/dev/null | grep -F \"$(sed -n 's/^Address = //p' %q | head -n1 | cut -d/ -f1)\" >&2 || true\n"+
 			"    wg show interfaces >&2 || true\n"+
+			"    wg show all listen-port >&2 || true\n"+
 			"    grep -n '^Address\\|^ListenPort' /etc/wireguard/%q >&2 || true\n"+
 			"    exit 1\n"+
 			"  fi\n"+
 			"fi\n",
 			f, f, name, "wg-quick@"+name+".service", name, name, name, name,
-			f, f, name, name, f, f)
+			f, f, f, f, name, name, f, f)
 		// Интерфейс должен подниматься после перезагрузки: apply.sh запускается
 		// один раз, а systemd поднимет wg-quick@<имя> сам.
 		fmt.Fprintf(&b, "if [ -d /run/systemd/system ]; then systemctl enable %q >/dev/null 2>&1 || true; fi\n",

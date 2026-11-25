@@ -72,6 +72,10 @@ func TestApplyScriptChecksBusyAddress(t *testing.T) {
 	if !strings.Contains(script, "уже занят интерфейсом") {
 		t.Error("нет предварительной проверки занятого адреса")
 	}
+	if !strings.Contains(script, "ss -lunH") {
+		t.Error("нет проверки занятого UDP-порта: ядро биндит порт при `ip link set up`, " +
+			"и занятый порт даёт «Address already in use» при свободном адресе")
+	}
 	if !strings.Contains(script, "grep '^wgc-'") {
 		t.Error("нет снятия наших интерфейсов без конфига")
 	}
