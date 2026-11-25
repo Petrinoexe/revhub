@@ -9,6 +9,8 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+
+	"revhub/internal/fsperm"
 )
 
 type Secret struct {
@@ -94,7 +96,7 @@ func (s *Store) persist() error {
 		return err
 	}
 	tmp.Close()
-	if err := os.Chmod(name, 0o600); err != nil {
+	if err := fsperm.Of(s.path).Apply(name); err != nil {
 		return err
 	}
 	return os.Rename(name, s.path)

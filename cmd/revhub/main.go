@@ -16,6 +16,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	iofs "io/fs"
 	"log"
 	"net"
 	"net/http"
@@ -120,6 +121,11 @@ func cmdServe(args []string) {
 
 	st, err := store.Open(*statePath)
 	if err != nil {
+		if errors.Is(err, iofs.ErrPermission) {
+			log.Fatalf("%v\nсостояние должно быть читаемо пользователю панели — починить права: "+
+				"sudo revhub repair (или: chown root:<группа панели> %s && chmod 660 %s)",
+				err, *statePath, *statePath)
+		}
 		log.Fatal(err)
 	}
 	sec, err := secrets.Open(*statePath)

@@ -399,6 +399,26 @@ func Repair(o Options, statePath string) (*Report, error) {
 		}
 		return "юнит обновлён (ProtectSystem=full, доступ к xray/wireguard, AF_NETLINK), сервис перезапущен", nil
 	})
+	r.step("права на состояние", func() (string, error) {
+		// Панель работает непривилегированным пользователем. Если state.json
+		// остался root:root (его написало что-то от root), старт падает с
+		// «permission denied», и systemd крутит рестарты. Пользователя берём из
+		// юнита: установщик мог поставить панель не под дефолтным именем.
+		if u := unitPanelUser(filepath.Join(o.UnitDir, "revhub.service")); u != "" {
+			o.PanelUser = u
+		}
+		detail, err := r.grantPanelAccess(o)
+		if err != nil {
+			return "", err
+		}
+		if o.DryRun {
+			return detail, nil
+		}
+		if err := r.run("systemctl", "restart", "revhub"); err != nil {
+			return detail + " (панель не перезапустилась: " + err.Error() + ")", nil
+		}
+		return detail + ", панель перезапущена", nil
+	})
 	r.step("артефакты узла", func() (string, error) {
 		st, err := readState(statePath)
 		if err != nil {
@@ -1051,6 +1071,21 @@ func applySudoersBody(panelUser, bin string) string {
 # Аргументы не ограничиваем: sudo сравнивает их буквально и сломался бы на --node.
 %s ALL=(root) NOPASSWD: %s
 `, panelUser, bin)
+}
+
+// unitPanelUser — пользователь из строки User= юнита ("" если юнита нет).
+func unitPanelUser(path string) string {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	for _, line := range strings.Split(string(b), "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "User=") {
+			return strings.TrimSpace(strings.TrimPrefix(line, "User="))
+		}
+	}
+	return ""
 }
 
 // upgradePanelUnit правит права уже установленного юнита панели под текущую

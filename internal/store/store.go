@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"sync"
 
+	"revhub/internal/fsperm"
 	"revhub/internal/model"
 )
 
@@ -105,6 +106,9 @@ func (s *Store) persist() error {
 	if err := os.MkdirAll(dir, 0o750); err != nil {
 		return err
 	}
+	// Права — у прежнего файла: apply-local и CLI пишут от root, а читает
+	// состояние непривилегированная панель (иначе «permission denied» на старте).
+	perm := fsperm.Of(s.path)
 	tmp, err := os.CreateTemp(dir, ".state-*")
 	if err != nil {
 		return err
@@ -122,7 +126,7 @@ func (s *Store) persist() error {
 	if err := tmp.Close(); err != nil {
 		return err
 	}
-	if err := os.Chmod(name, 0o600); err != nil {
+	if err := perm.Apply(name); err != nil {
 		return err
 	}
 	return os.Rename(name, s.path)
