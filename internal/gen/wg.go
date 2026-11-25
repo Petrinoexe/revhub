@@ -237,15 +237,19 @@ func ClientWGConf(st model.State, in model.Inbound, nodeID string) (string, erro
 
 	// Трафик пир→пир идёт через этот же интерфейс, значит это форвардинг:
 	// без ip_forward и разрешения в forward-цепочке он молча умирает.
-	b.WriteString("PostUp = sysctl -q -w net.ipv4.ip_forward=1\n")
-	b.WriteString("PostUp = printf '2\\n' > /proc/sys/net/ipv4/conf/%i/rp_filter\n")
+	b.WriteString("PostUp = " + soft("sysctl -q -w net.ipv4.ip_forward=1",
+		"ip_forward не включился (read-only /proc/sys?) — включи его на узле сам") + "\n")
+	b.WriteString("PostUp = " + soft("printf '2\\n' > /proc/sys/net/ipv4/conf/%i/rp_filter",
+		"rp_filter не сброшен в loose — часть пакетов может фильтроваться") + "\n")
 
 	// Разрешение в FORWARD — именно в общей цепочке filter/FORWARD, а не в
 	// своей nft-таблице: ufw и docker держат там же свои правила и дропают
 	// раньше; приватная base-цепочка чужой drop не отменяет. iptables на
 	// современных системах — это тот же nftables, поэтому правило одно.
-	b.WriteString("PostUp = iptables -I FORWARD -i %i -j ACCEPT\n")
-	b.WriteString("PostUp = iptables -I FORWARD -o %i -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT\n")
+	b.WriteString("PostUp = " + soft("iptables -I FORWARD -i %i -j ACCEPT",
+		"правило FORWARD не добавилось — клиенты не пройдут при политике drop") + "\n")
+	b.WriteString("PostUp = " + soft("iptables -I FORWARD -o %i -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT",
+		"правило FORWARD для обратного трафика не добавилось") + "\n")
 	b.WriteString("PostDown = iptables -D FORWARD -i %i -j ACCEPT 2>/dev/null || true\n")
 	b.WriteString("PostDown = iptables -D FORWARD -o %i -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true\n")
 
@@ -345,6 +349,14 @@ func nftTable(iface string) string {
 	return fmt.Sprintf("revhub_%x", sum[:6])
 }
 
+// soft делает хук необязательным: сбой не должен валить интерфейс. В
+// контейнерах и на VPS с read-only /proc/sys запись sysctl и rp_filter
+// запрещена, iptables может отсутствовать — раньше это роняло wg-quick,
+// и созданный интерфейс удалялся целиком.
+func soft(cmd, why string) string {
+	return cmd + ` 2>/dev/null || echo "[revhub] ` + why + `" >&2`
+}
+
 // shellJoin собирает строки для `printf '%s\n' ...` в конфиге wg-quick.
 func shellJoin(items []string) string {
 	quoted := make([]string, len(items))
@@ -417,7 +429,8 @@ func WGConfig(st model.State, t model.Tunnel, nodeID string) (string, error) {
 		fmt.Fprintf(&b, "PostUp = ip rule add fwmark %d lookup %d 2>/dev/null || true\n", t.Mark, t.Mark)
 		fmt.Fprintf(&b, "PostUp = ip -4 route replace default dev %%i table %d\n", t.Mark)
 		// Replies arrive on WireGuard, while the unmarked reverse path uses the WAN.
-		b.WriteString("PostUp = printf '2\\n' > /proc/sys/net/ipv4/conf/%i/rp_filter\n")
+		b.WriteString("PostUp = " + soft("printf '2\\n' > /proc/sys/net/ipv4/conf/%i/rp_filter",
+			"rp_filter не сброшен в loose — часть пакетов может фильтроваться") + "\n")
 		fmt.Fprintf(&b, "PostDown = ip rule del fwmark %d lookup %d 2>/dev/null || true\n", t.Mark, t.Mark)
 		fmt.Fprintf(&b, "PostDown = ip -4 route flush table %d 2>/dev/null || true\n", t.Mark)
 	}
@@ -497,7 +510,8 @@ func writeNAT(b *strings.Builder, t model.Tunnel, fromAddr string, clients []str
 			legacy = append(legacy, "-s "+s+" -o "+iface)
 		}
 	}
-	b.WriteString("PostUp = sysctl -q -w net.ipv4.ip_forward=1\n")
+	b.WriteString("PostUp = " + soft("sysctl -q -w net.ipv4.ip_forward=1",
+		"ip_forward не включился (read-only /proc/sys?) — включи его на узле сам") + "\n")
 	// Обратный маршрут к клиентским сетям через туннель: без него строгий
 	// rp_filter выбрасывает пакеты с чужим адресом источника, а ответы не
 	// находят дорогу назад. Table = off, поэтому маршрут ставим сами.
@@ -505,12 +519,15 @@ func writeNAT(b *strings.Builder, t model.Tunnel, fromAddr string, clients []str
 		fmt.Fprintf(b, "PostUp = ip -4 route replace %s dev %%i\n", c)
 		fmt.Fprintf(b, "PostDown = ip -4 route del %s dev %%i 2>/dev/null || true\n", c)
 	}
-	b.WriteString("PostUp = printf '2\\n' > /proc/sys/net/ipv4/conf/%i/rp_filter\n")
+	b.WriteString("PostUp = " + soft("printf '2\\n' > /proc/sys/net/ipv4/conf/%i/rp_filter",
+		"rp_filter не сброшен в loose — часть пакетов может фильтроваться") + "\n")
 	// Пакеты клиентов приходят в туннель и уходят наружу — это форвардинг.
 	// ufw и docker держат в filter/FORWARD политику drop, поэтому разрешаем
 	// явно, в общей цепочке: приватная таблица чужой drop не отменяет.
-	b.WriteString("PostUp = iptables -I FORWARD -i %i -j ACCEPT\n")
-	b.WriteString("PostUp = iptables -I FORWARD -o %i -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT\n")
+	b.WriteString("PostUp = " + soft("iptables -I FORWARD -i %i -j ACCEPT",
+		"правило FORWARD не добавилось — клиенты не пройдут при политике drop") + "\n")
+	b.WriteString("PostUp = " + soft("iptables -I FORWARD -o %i -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT",
+		"правило FORWARD для обратного трафика не добавилось") + "\n")
 	b.WriteString("PostDown = iptables -D FORWARD -i %i -j ACCEPT 2>/dev/null || true\n")
 	b.WriteString("PostDown = iptables -D FORWARD -o %i -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true\n")
 	// Create a separate table so nftables works even on a fresh exit node.
