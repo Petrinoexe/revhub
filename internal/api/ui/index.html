@@ -897,10 +897,12 @@ function renderInfra(v){
     </div></div>
     <div class="row"><button class="b" onclick="addInfraPeer()">+ пир</button>
       <span class="mut">Ключи и адрес выдаются при сохранении. Новый пир не требует обновления подписок и применяется без перезапуска интерфейса.</span></div>
-    ${peers.length?`<table class="tbl"><thead><tr><th>имя</th><th>адрес</th><th>вкл</th><th>личный выход</th><th></th></tr></thead><tbody>
+    ${peers.length?`<table class="tbl"><thead><tr><th>имя</th><th>адрес</th><th>DNS</th><th>вкл</th><th>личный выход</th><th></th></tr></thead><tbody>
       ${peers.map((p,i)=>`<tr>
         <td><input value="${esc(p.name||'')}" oninput="setInfraPeer(${i},'name',this.value)" placeholder="srv-db"></td>
         <td class="mut">${esc(p.address||'выдастся при сохранении')}</td>
+        <td><input value="${esc(p.dns||'')}" onchange="setInfraPeer(${i},'dns',this.value.trim())"
+            aria-label="DNS пира" placeholder="IP через запятую"></td>
         <td><input type="checkbox" ${p.enabled!==false?'checked':''} onchange="setInfraPeer(${i},'enabled',this.checked)"></td>
         <td><select onchange="setInfraPeer(${i},'egress',this.value)">${infraEgressOpts(p.egress)}</select></td>
         <td><a class="b" href="/api/infra/${encodeURIComponent(p.id||p.name||'')}/wg-conf">wg</a>
@@ -921,8 +923,8 @@ function renderDNS(v){
   <div class="card"><div class="body">
     <div class="hint">Корневой домен включает авторитетную зону инфраструктуры: имена инфра-пиров
       (<b>имя.зона</b>) и панели (<b>панель.зона</b>) отдаёт dnsmasq на <b>wg-infra</b>.
-      Клиентские DNS-запросы приходят туда через Xray; ответы из подсети инфры идут в неё,
-      остальные имена резолвятся публичными DNS через выбранный выходной туннель.</div>
+      Xray направляет клиентский DNS с порта 53 на dnsmasq.
+      В Throne укажите этот резолвер как Remote DNS по TCP${ic.subnet ? ' и направьте '+esc(ic.subnet)+' через прокси в настройках TUN' : ''}.</div>
     ${disabledHint}
     <div class="grid">
       <div class="f"><label>Корневой домен (зона)</label><input value="${esc(d.root)}" placeholder="infra.cringe" onchange="setDNS('root',this.value.trim().toLowerCase())"></div>
@@ -958,8 +960,9 @@ async function loadDNSStatus(){
         ? `зона <b>${esc(j.zone)}</b> на узле ${esc(nodeLabel(j.node_id))} · порт ${esc(j.port)} · dnsmasq: ${esc(dnsmasq)}`
         : 'зона выключена — задай корневой домен и сохрани'}</div>
       ${j.records && j.records.length ? `<div class="grp">Зона</div><table class="tbl"><tr><th>имя</th><th>адрес</th><th>кто</th></tr>${rows}</table>` : ''}
+      ${j.address ? `<div class="mut">Remote DNS для Throne <code>tcp://${esc(j.address)}:${esc(j.port)}</code></div>` : ''}
       ${j.conf ? `<div class="grp">Конфиг dnsmasq → ${esc(j.path)}</div><pre>${esc(j.conf)}</pre>
-        <div class="grp">Зона → /etc/revhub/dns-hosts</div><pre>${esc(j.hosts)}</pre>` : ''}`;
+        <div class="grp">Зона → /etc/dnsmasq.d/revhub/hosts</div><pre>${esc(j.hosts)}</pre>` : ''}`;
   }catch(e){ box.textContent = e.message; }
 }
 async function dnsCheck(){

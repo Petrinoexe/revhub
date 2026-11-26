@@ -3,6 +3,7 @@ package sub
 import (
 	"encoding/json"
 	"fmt"
+	"net"
 
 	"revhub/internal/model"
 )
@@ -10,8 +11,8 @@ import (
 // SingBoxJSON рендерит готовый sing-box конфиг для клиентов вроде Throne:
 // интернет и сеть внутри одного профиля, без ручной настройки DNS.
 //
-// wireguard:// ссылка переносит только ключи и endpoint — DNS и маршруты
-// клиент не получает. Поэтому внутренняя зона и выход в интернет описаны
+// При импорте ссылки Throne берёт DNS и маршруты из собственного профиля.
+// Для пользователей полного JSON внутренняя зона и выход в интернет описаны
 // здесь явно: DNS-правило domain_suffix → dnsmasq хаба, весь остальной
 // трафик — через туннель.
 //
@@ -46,35 +47,41 @@ func SingBoxJSON(st model.State, c model.Client) ([]byte, bool, error) {
 
 	dnsServers := []map[string]any{}
 	var dnsRules []map[string]any
-	if st.DNS != nil && st.DNS.Enabled() && st.DNS.NodeID == in.NodeID &&
-		st.Infra != nil && st.Infra.Enabled && st.Infra.NodeID == in.NodeID {
-		if addr := st.Infra.ServerAddress(); addr != "" {
-			dnsServers = append(dnsServers, map[string]any{
-				"tag": "infra", "type": "udp", "server": addr, "detour": "wg-out",
-			})
-			dnsRules = append(dnsRules, map[string]any{
-				"domain_suffix": []string{"." + st.DNS.Root}, "server": "infra",
-			})
-		}
+	if addr, port := st.InfraDNSAddress(in.NodeID); addr != "" {
+		dnsServers = append(dnsServers, map[string]any{
+			"tag": "infra", "type": "udp", "server": addr, "server_port": port, "detour": "wg-out",
+		})
+		dnsRules = append(dnsRules, map[string]any{
+			"domain_suffix": []string{st.DNS.Root}, "action": "route", "server": "infra",
+		})
 	}
+
 	// Внешние имена — тоже через туннель: иначе при выходе через туннель
 	// резолвер «выезжает» из другой страны, чем сам трафик.
 	dnsServers = append(dnsServers, map[string]any{
 		"tag": "default", "type": "udp", "server": "1.1.1.1", "detour": "wg-out",
 	})
 
-	wireguard := map[string]any{
-		"type":            "wireguard",
-		"tag":             "wg-out",
-		"server":          hostOnlyOf(wgEndpoint(in, node)),
-		"server_port":     in.Port,
-		"local_address":   []string{peer.Address},
-		"private_key":     peer.PrivateKey,
-		"peer_public_key": in.WireGuard.PublicKey,
-		"mtu":             model.DefaultWireGuardMTU,
+	host, _ := hostPort(node.PublicAddr, in.Port)
+	remotePeer := map[string]any{
+		"address": host, "port": in.Port, "public_key": in.WireGuard.PublicKey,
+		"allowed_ips": []string{"0.0.0.0/0"}, "persistent_keepalive_interval": 25,
 	}
 	if peer.PresharedKey != "" {
-		wireguard["pre_shared_key"] = peer.PresharedKey
+		remotePeer["pre_shared_key"] = peer.PresharedKey
+	}
+	wireguard := map[string]any{
+		"type":        "wireguard",
+		"tag":         "wg-out",
+		"address":     []string{peer.Address},
+		"private_key": peer.PrivateKey,
+		"mtu":         model.DefaultWireGuardMTU,
+		"peers":       []any{remotePeer},
+	}
+	if net.ParseIP(host) == nil {
+		// Endpoint должен быть разрешим ещё до подключения VPN.
+		dnsServers = append(dnsServers, map[string]any{"tag": "bootstrap", "type": "local"})
+		wireguard["domain_resolver"] = "bootstrap"
 	}
 
 	cfg := map[string]any{
@@ -84,11 +91,9 @@ func SingBoxJSON(st model.State, c model.Client) ([]byte, bool, error) {
 			"rules":   dnsRules,
 			"final":   "default",
 		},
-		"outbounds": []any{
-			wireguard,
-			map[string]any{"type": "direct", "tag": "direct"},
-		},
+		"endpoints": []any{wireguard},
 		"route": map[string]any{
+			"rules":                 []any{map[string]any{"port": 53, "action": "hijack-dns"}},
 			"final":                 "wg-out",
 			"auto_detect_interface": true,
 		},
@@ -102,13 +107,4 @@ func SingBoxJSON(st model.State, c model.Client) ([]byte, bool, error) {
 		return nil, false, fmt.Errorf("sing-box конфиг: %w", err)
 	}
 	return append(out, '\n'), true, nil
-}
-
-func hostOnlyOf(hostport string) string {
-	for i := len(hostport) - 1; i >= 0; i-- {
-		if hostport[i] == ':' {
-			return hostport[:i]
-		}
-	}
-	return hostport
 }

@@ -26,7 +26,7 @@ func (s *Server) dnsStatus(w http.ResponseWriter, r *http.Request) {
 		resp["enabled"] = true
 		resp["zone"] = st.DNS.Root
 		resp["node_id"] = st.DNS.NodeID
-		resp["port"] = st.DNS.Port
+		resp["address"], resp["port"] = st.InfraDNSAddress(st.DNS.NodeID)
 		resp["ttl"] = st.DNS.TTL
 		resp["upstream"] = st.DNS.Upstream
 		resp["panel"] = st.DNS.FQDN(DNSLabel(st))

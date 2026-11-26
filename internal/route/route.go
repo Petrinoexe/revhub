@@ -46,6 +46,20 @@ type Decision struct {
 // Check возвращает точный матч и правила-претенденты с непроверяемыми
 // условиями, стоящие выше него.
 func Check(st model.State, q Query) Decision {
+	if addr, _ := st.InfraDNSAddress(q.Node); addr != "" {
+		if q.Port == "53" && (q.Network == "tcp" || q.Network == "udp") {
+			for _, in := range st.Inbounds {
+				if in.Enabled && in.NodeID == q.Node && in.Tag == q.Inbound {
+					return Decision{Matched: true, RuleName: "DNS инфраструктуры", Outbound: model.TagInfraDNS,
+						Reason: "клиентский DNS на порту 53 перенаправляется в dnsmasq"}
+				}
+			}
+		}
+		if matched, _ := matchDomain([]string{"domain:" + st.DNS.Root}, q.Domain); matched {
+			return Decision{Matched: true, RuleName: "зона инфраструктуры", Outbound: model.TagInfra,
+				Reason: "имя в зоне " + st.DNS.Root + " разрешается через dnsmasq"}
+		}
+	}
 	// Системное правило xray: инфра-подсеть → freedom infra — стоит в конфиге
 	// выше всех пользовательских правил (§5 ТЗ). Проверяем его до их цикла,
 	// иначе dry-run врал бы против реального поведения ядра.

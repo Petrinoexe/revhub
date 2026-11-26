@@ -48,11 +48,8 @@ func WireGuardConfigs(st model.State, c model.Client) []Config {
 
 // wireGuardDNS — один резолвер и для wireguard://, и для скачанного .conf.
 func wireGuardDNS(st model.State, in model.Inbound) string {
-	if st.DNS != nil && st.DNS.Enabled() && st.DNS.NodeID == in.NodeID &&
-		st.Infra != nil && st.Infra.Enabled && st.Infra.NodeID == in.NodeID {
-		if addr := st.Infra.ServerAddress(); addr != "" {
-			return addr
-		}
+	if addr, _ := st.InfraDNSAddress(in.NodeID); addr != "" {
+		return addr
 	}
 	// DNS зоны пока нет: отдаём один внешний резолвер. Список через запятую
 	// часть клиентов парсит как одно (невалидное) имя.
@@ -71,7 +68,7 @@ func wgConfigText(st model.State, c model.Client, in model.Inbound, node model.N
 	b.WriteString("[Interface]\n")
 	fmt.Fprintf(&b, "PrivateKey = %s\n", peer.PrivateKey)
 	fmt.Fprintf(&b, "Address = %s\n", peer.Address)
-	// Зона DNS живёт на адресе интерфейса (dnsmasq слушает 10.88.0.1).
+	// При включённой зоне используем адрес резолвера на wg-infra.
 	dns := wireGuardDNS(st, in)
 	if dns != "" {
 		fmt.Fprintf(&b, "DNS = %s\n", dns)

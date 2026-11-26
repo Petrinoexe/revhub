@@ -49,9 +49,10 @@ func (ic InfraConfig) ServerAddress() string {
 // InfraPeer — машина инфраструктуры: ключи, адрес, имя.
 type InfraPeer struct {
 	ID           string `json:"id"`
-	Name         string `json:"name"`               // человекочитаемое (srv-db, laptop-vadim)
-	Hostname     string `json:"hostname,omitempty"` // для будущего DNS
-	Address      string `json:"address"`            // 10.89.0.N/32, выдаёт Normalize
+	Name         string `json:"name"` // человекочитаемое (srv-db, laptop-vadim)
+	Hostname     string `json:"hostname,omitempty"`
+	DNS          string `json:"dns,omitempty"` // адреса резолверов для wg-quick
+	Address      string `json:"address"`       // 10.89.0.N/32, выдаёт Normalize
 	PrivateKey   string `json:"private_key"`
 	PublicKey    string `json:"public_key"`
 	PresharedKey string `json:"preshared_key"`
@@ -191,6 +192,14 @@ func (s State) validateInfra(add func(string, ...any)) {
 		who := "инфра-пир " + pr.display()
 		if pr.Name == "" {
 			add("%s: пустое имя", who)
+		}
+		if pr.DNS != "" {
+			for _, server := range strings.Split(pr.DNS, ",") {
+				if net.ParseIP(strings.TrimSpace(server)) == nil {
+					add("%s: DNS — IP-адреса через запятую", who)
+					break
+				}
+			}
 		}
 		if !pr.Enabled {
 			continue

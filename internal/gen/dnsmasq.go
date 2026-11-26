@@ -13,19 +13,13 @@ import (
 // файла из модели, а dnsmasq (системный сервис) их читает.
 type DNSMasqFiles struct {
 	Conf  string // /etc/dnsmasq.d/revhub.conf
-	Hosts string // /etc/revhub/dns-hosts
+	Hosts string // /etc/dnsmasq.d/revhub/hosts
 }
 
 // DNSMasq рендерит конфиг и зону для узла инфраструктуры. ok=false — DNS
 // выключен, живёт на другом узле или инфраструктурная сеть не поднята.
 func DNSMasq(st model.State, nodeID string) (DNSMasqFiles, bool, error) {
-	if st.DNS == nil || !st.DNS.Enabled() || st.DNS.NodeID != nodeID {
-		return DNSMasqFiles{}, false, nil
-	}
-	if st.Infra == nil || !st.Infra.Enabled || st.Infra.NodeID != nodeID {
-		return DNSMasqFiles{}, false, nil
-	}
-	listen := st.Infra.ServerAddress()
+	listen, port := st.InfraDNSAddress(nodeID)
 	if listen == "" {
 		return DNSMasqFiles{}, false, nil
 	}
@@ -36,7 +30,7 @@ func DNSMasq(st model.State, nodeID string) (DNSMasqFiles, bool, error) {
 	var b strings.Builder
 	b.WriteString("# revhub: DNS сети инфраструктуры (wg-infra) — генерируется панелью\n")
 	b.WriteString("# клиентские DNS-запросы приходят сюда через Xray; правки перетираются\n")
-	fmt.Fprintf(&b, "port=%d\n", st.DNS.Port)
+	fmt.Fprintf(&b, "port=%d\n", port)
 	// Слушаем только адрес хаба в инфра-сети: наружу резолвер не торчит.
 	fmt.Fprintf(&b, "listen-address=%s\n", listen)
 	b.WriteString("bind-dynamic\n")
@@ -121,7 +115,7 @@ func dnsTunnelSource(st model.State, nodeID string) string {
 // Пути на узле (их читает dnsmasq и пишет apply.sh).
 const (
 	DNSMasqConfPath  = "/etc/dnsmasq.d/revhub.conf"
-	DNSHostsPath     = "/etc/revhub/dns-hosts"
+	DNSHostsPath     = "/etc/dnsmasq.d/revhub/hosts"
 	DNSMasqConfName  = "dnsmasq-revhub.conf"
 	DNSHostsFileName = "dns-hosts"
 )

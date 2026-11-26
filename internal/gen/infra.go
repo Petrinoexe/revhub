@@ -199,6 +199,9 @@ func InfraPeerConfig(st model.State, peer model.InfraPeer) (string, bool, error)
 	b.WriteString("[Interface]\n")
 	fmt.Fprintf(&b, "PrivateKey = %s\n", peer.PrivateKey)
 	fmt.Fprintf(&b, "Address = %s\n", peer.Address)
+	if dns := strings.TrimSpace(peer.DNS); dns != "" {
+		fmt.Fprintf(&b, "DNS = %s\n", dns)
+	}
 	fmt.Fprintf(&b, "MTU = %d\n", model.DefaultWireGuardMTU)
 	b.WriteString("\n[Peer]\n")
 	fmt.Fprintf(&b, "PublicKey = %s\n", ic.PublicKey)

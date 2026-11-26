@@ -73,6 +73,7 @@ func TestInfraArtifactsRendered(t *testing.T) {
 
 func TestInfraPeerConfig(t *testing.T) {
 	st := infraGenState()
+	st.InfraPeers[0].DNS = "10.89.0.1, 1.1.1.1"
 	conf, ok, err := InfraPeerConfig(st, st.InfraPeers[0])
 	if err != nil || !ok {
 		t.Fatalf("конфиг пира не отрендерился: %v", err)
@@ -80,6 +81,7 @@ func TestInfraPeerConfig(t *testing.T) {
 	for _, want := range []string{
 		"PrivateKey = " + st.InfraPeers[0].PrivateKey,
 		"Address = 10.89.0.2/32",
+		"DNS = 10.89.0.1, 1.1.1.1",
 		"PublicKey = " + st.Infra.PublicKey,
 		"PresharedKey = " + st.InfraPeers[0].PresharedKey,
 		"AllowedIPs = 0.0.0.0/0",

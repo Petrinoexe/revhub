@@ -46,11 +46,33 @@ func XrayConfig(st model.State, nodeID string) (map[string]any, error) {
 		map[string]any{"protocol": "freedom", "tag": model.TagDirect},
 		map[string]any{"protocol": "blackhole", "tag": model.TagBlock},
 	}
-	if st.InfraSubnet(nodeID) != "" {
-		// Трафик в инфраструктуру — напрямую, без меток: дальше по main-таблице
-		// его доставит системный wg-infra. Никаких mark: иначе пакеты ушли бы
-		// в туннельный fwmark-маршрут, а не в инфра-подсеть.
-		outbounds = append(outbounds, map[string]any{"protocol": "freedom", "tag": model.TagInfra})
+	dnsAddress, dnsPort := st.InfraDNSAddress(nodeID)
+	if subnet := st.InfraSubnet(nodeID); subnet != "" {
+		// Freedom проверяет назначение после выбора маршрута и по умолчанию
+		// блокирует частные адреса у входящих VLESS и WireGuard.
+		infra := map[string]any{
+			"protocol": "freedom", "tag": model.TagInfra,
+			"settings": map[string]any{"finalRules": []any{
+				map[string]any{"action": "allow", "ip": []string{subnet}},
+			}},
+		}
+		if dnsAddress != "" {
+			infra["streamSettings"] = map[string]any{
+				"sockopt": map[string]any{"domainStrategy": "ForceIPv4"},
+			}
+		}
+		outbounds = append(outbounds, infra)
+	}
+	if dnsAddress != "" {
+		outbounds = append(outbounds, map[string]any{
+			"protocol": "freedom", "tag": model.TagInfraDNS,
+			"settings": map[string]any{
+				"redirect": hostPortJoin(dnsAddress, dnsPort),
+				"finalRules": []any{map[string]any{
+					"action": "allow", "ip": []string{dnsAddress}, "port": dnsPort, "network": "tcp,udp",
+				}},
+			},
+		})
 	}
 
 	for _, t := range st.Tunnels {
@@ -107,6 +129,12 @@ func XrayConfig(st model.State, nodeID string) (map[string]any, error) {
 		"outbounds": outbounds,
 		"routing":   map[string]any{"domainStrategy": "AsIs", "rules": rules},
 	}
+	if dnsAddress != "" {
+		cfg["dns"] = map[string]any{
+			"servers": []string{"tcp+local://" + hostPortJoin(dnsAddress, dnsPort)},
+		}
+	}
+
 	return cfg, nil
 }
 
@@ -163,6 +191,14 @@ func buildInbound(st model.State, in model.Inbound) (map[string]any, error) {
 	if err != nil {
 		return nil, err
 	}
+	sniffing := map[string]any{
+		"enabled":      true,
+		"destOverride": []string{"http", "tls", "quic"},
+	}
+	if subnet := st.InfraSubnet(in.NodeID); subnet != "" {
+		// HTTP Host и TLS SNI не должны заменять IP инфраструктуры.
+		sniffing["ipsExcluded"] = []string{subnet}
+	}
 	return map[string]any{
 		"tag":            in.Tag,
 		"listen":         in.Listen,
@@ -170,10 +206,7 @@ func buildInbound(st model.State, in model.Inbound) (map[string]any, error) {
 		"protocol":       "vless",
 		"settings":       settings,
 		"streamSettings": stream,
-		"sniffing": map[string]any{
-			"enabled":      true,
-			"destOverride": []string{"http", "tls", "quic"},
-		},
+		"sniffing":       sniffing,
 	}, nil
 }
 
@@ -414,6 +447,23 @@ func buildRules(st model.State, nodeID string) ([]any, error) {
 	rules := []any{map[string]any{
 		"type": "field", "inboundTag": []string{apiTag}, "outboundTag": apiTag,
 	}}
+	if addr, _ := st.InfraDNSAddress(nodeID); addr != "" {
+		var tags []string
+		for _, in := range st.Inbounds {
+			if in.Enabled && in.NodeID == nodeID {
+				tags = append(tags, in.Tag)
+			}
+		}
+		if len(tags) > 0 {
+			rules = append(rules, map[string]any{
+				"type": "field", "inboundTag": tags, "network": "tcp,udp",
+				"port": "53", "outboundTag": model.TagInfraDNS,
+			})
+		}
+		rules = append(rules, map[string]any{
+			"type": "field", "domain": []string{"domain:" + st.DNS.Root}, "outboundTag": model.TagInfra,
+		})
+	}
 	if subnet := st.InfraSubnet(nodeID); subnet != "" {
 		rules = append(rules, map[string]any{
 			"type": "field", "ip": []string{subnet}, "outboundTag": model.TagInfra,

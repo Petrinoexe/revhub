@@ -49,6 +49,18 @@ func (d DNSConfig) FQDN(label string) string {
 	return strings.ToLower(label) + "." + strings.ToLower(d.Root)
 }
 
+// InfraDNSAddress возвращает адрес и порт резолвера на узле wg-infra.
+func (s State) InfraDNSAddress(nodeID string) (string, int) {
+	if s.DNS == nil || !s.DNS.Enabled() || s.DNS.NodeID != nodeID || s.InfraSubnet(nodeID) == "" {
+		return "", 0
+	}
+	port := s.DNS.Port
+	if port == 0 {
+		port = DefaultDNSPort
+	}
+	return s.Infra.ServerAddress(), port
+}
+
 // DNSRecord — одна A-запись зоны.
 type DNSRecord struct {
 	Name string `json:"name"` // полное имя без точки на конце

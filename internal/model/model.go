@@ -30,10 +30,11 @@ const (
 
 // Теги служебных исходящих.
 const (
-	TagDirect = "direct"
-	TagBlock  = "block"
-	TagInfra  = "infra" // freedom-outbound в инфраструктурную сеть
-	TagTunnel = "tun:"  // + имя туннеля
+	TagDirect   = "direct"
+	TagBlock    = "block"
+	TagInfra    = "infra"     // freedom-outbound в инфраструктурную сеть
+	TagInfraDNS = "infra-dns" // системный выход к dnsmasq
+	TagTunnel   = "tun:"      // + имя туннеля
 )
 
 type State struct {

@@ -239,7 +239,7 @@ nft-таблице, разрешение в общей цепочке `filter/FO
 **Выбрали:** `gen.DNSMasq` рендерит два файла — `/etc/dnsmasq.d/revhub.conf`
 (`listen-address` только адреса WG, `bind-dynamic`, `no-hosts`,
 `local=/<зона>/`, upstream'ы либо `/etc/resolv.conf` узла) и файл зоны
-`/etc/revhub/dns-hosts`. `apply.sh` ставит их, делает `restart` при смене
+`/etc/dnsmasq.d/revhub/hosts`. `apply.sh` ставит их, делает `restart` при смене
 конфига и `reload` (SIGHUP перечитывает hosts), при выключении DNS убирает
 файлы и глушит сервис, если чужих конфигов нет.
 

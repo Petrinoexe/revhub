@@ -58,7 +58,7 @@ func TestDNSMasqRendersZone(t *testing.T) {
 		"no-resolv\n",
 		"server=1.1.1.1@" + src + "\n",
 		"server=1.0.0.1@" + src + "\n",
-		"addn-hosts=/etc/revhub/dns-hosts\n",
+		"addn-hosts=/etc/dnsmasq.d/revhub/hosts\n",
 	} {
 		if !strings.Contains(files.Conf, want) {
 			t.Errorf("в конфиге dnsmasq нет %q:\n%s", want, files.Conf)
@@ -139,7 +139,7 @@ func TestDNSArtifactsReachApplyScript(t *testing.T) {
 		}
 	}
 	script := names["apply.sh"].Content
-	for _, want := range []string{"/etc/dnsmasq.d/revhub.conf", "/etc/revhub/dns-hosts", "dnsmasq"} {
+	for _, want := range []string{"/etc/dnsmasq.d/revhub.conf", "/etc/dnsmasq.d/revhub/hosts", "dnsmasq"} {
 		if !strings.Contains(script, want) {
 			t.Errorf("apply.sh не ставит %q", want)
 		}

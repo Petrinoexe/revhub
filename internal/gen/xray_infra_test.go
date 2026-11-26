@@ -45,6 +45,10 @@ func TestXrayHasInfraOutboundOnlyOnInfraNode(t *testing.T) {
 			if ob["protocol"] != "freedom" {
 				t.Errorf("infra-outbound должен быть freedom, получено %v", ob["protocol"])
 			}
+			rule := ob["settings"].(map[string]any)["finalRules"].([]any)[0].(map[string]any)
+			if rule["action"] != "allow" || rule["ip"].([]any)[0] != st.Infra.Subnet {
+				t.Errorf("Freedom должен разрешать только подсеть инфраструктуры: %v", rule)
+			}
 			if ss, ok := ob["streamSettings"]; ok {
 				t.Errorf("infra-outbound не должен иметь mark/streamSettings: %v", ss)
 			}

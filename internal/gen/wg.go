@@ -1027,9 +1027,7 @@ fi
 		// (бывает в контейнерах), применение сети не должно падать целиком.
 		// Пишем предупреждение и продолжаем — сеть важнее зоны имён.
 		b.WriteString(`
-install -d -m 755 /etc/dnsmasq.d 2>/dev/null || true
-# Сохраняем групповую запись в каталог, где панель заменяет state.json.
-mkdir -p /etc/revhub 2>/dev/null || true
+install -d -m 755 /etc/dnsmasq.d/revhub 2>/dev/null || true
 dns_changed=0
 dns_ok=1
 cmp -s dnsmasq-revhub.conf /etc/dnsmasq.d/revhub.conf 2>/dev/null || dns_changed=1
@@ -1037,23 +1035,24 @@ if ! install -m 644 dnsmasq-revhub.conf /etc/dnsmasq.d/revhub.conf 2>/dev/null; 
   dns_ok=0
   echo "[revhub] не записался /etc/dnsmasq.d/revhub.conf (файловая система только для чтения?) — зона DNS не обновится, сеть применяется дальше" >&2
 fi
-if ! install -m 644 dns-hosts /etc/revhub/dns-hosts 2>/dev/null; then
+if ! install -m 644 dns-hosts /etc/dnsmasq.d/revhub/hosts 2>/dev/null; then
   dns_ok=0
-  echo "[revhub] не записался /etc/revhub/dns-hosts — имена инфраструктуры в DNS не обновятся" >&2
+  echo "[revhub] не записался /etc/dnsmasq.d/revhub/hosts — имена инфраструктуры в DNS не обновятся" >&2
 fi
 if [ "$dns_ok" = 0 ]; then
   :
 elif ! command -v dnsmasq >/dev/null 2>&1; then
+  dns_ok=0
   echo "[revhub] dnsmasq не установлен: зона DNS не поднята (apt install dnsmasq)" >&2
 elif [ "$dns_changed" = 1 ]; then
   # Адреса, зона и порт читаются только при старте: SIGHUP перечитывает hosts.
   systemctl enable dnsmasq >/dev/null 2>&1 || true
-  systemctl restart dnsmasq || echo "[revhub] dnsmasq не перезапустился, смотри journalctl -u dnsmasq" >&2
+  systemctl restart dnsmasq || dns_ok=0
 else
-  systemctl reload dnsmasq >/dev/null 2>&1 || systemctl restart dnsmasq >/dev/null 2>&1 || true
+  systemctl reload dnsmasq >/dev/null 2>&1 || systemctl restart dnsmasq || dns_ok=0
 fi
 if [ "$dns_ok" = 0 ]; then
-  echo "[revhub] сеть применена, но DNS — нет: общий статус применения — ошибка" >&2
+  echo "[revhub] сеть применена, DNS не поднялся; подробности в journalctl -u dnsmasq" >&2
   exit 1
 fi
 `)
@@ -1061,9 +1060,9 @@ fi
 		// DNS выключили или перенесли на другой узел — убираем за собой.
 		b.WriteString(`
 if [ -f /etc/dnsmasq.d/revhub.conf ]; then
-  rm -f /etc/dnsmasq.d/revhub.conf /etc/revhub/dns-hosts 2>/dev/null || true
+  rm -f /etc/dnsmasq.d/revhub.conf /etc/dnsmasq.d/revhub/hosts 2>/dev/null || true
   # try-restart трогает сервис, только если он запущен: на узле без DNS он не нужен
-  systemctl reload dnsmasq >/dev/null 2>&1 || systemctl try-restart dnsmasq >/dev/null 2>&1 || true
+  systemctl try-restart dnsmasq >/dev/null 2>&1 || true
   # Свой конфиг убрали; если чужих в /etc/dnsmasq.d нет, глушим сервис —
   # иначе dnsmasq продолжит слушать 0.0.0.0:53 без нашей зоны.
   if ! ls /etc/dnsmasq.d/*.conf >/dev/null 2>&1 && ! grep -qE '^[[:space:]]*[^#]' /etc/dnsmasq.conf 2>/dev/null; then

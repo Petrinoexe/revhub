@@ -11,7 +11,7 @@ import (
 func TestSingBoxJSONRendersThroneConfig(t *testing.T) {
 	st := wgState()
 	st.Infra = &model.InfraConfig{Enabled: true, NodeID: "hub", Subnet: "10.89.0.0/24"}
-	st.DNS = &model.DNSConfig{Root: "vpn.internal", NodeID: "hub"}
+	st.DNS = &model.DNSConfig{Root: "vpn.internal", NodeID: "hub", Port: 5353}
 	raw, ok, err := SingBoxJSON(st, st.Clients[0])
 	if err != nil || !ok {
 		t.Fatalf("конфиг не отрендерился: ok=%v err=%v", ok, err)
@@ -21,36 +21,27 @@ func TestSingBoxJSONRendersThroneConfig(t *testing.T) {
 		t.Fatalf("конфиг не JSON: %v", err)
 	}
 
-	// outbound
-	obs := cfg["outbounds"].([]any)
-	wg := obs[0].(map[string]any)
+	wg := cfg["endpoints"].([]any)[0].(map[string]any)
 	peer := st.Clients[0].WireGuard["in-wg"]
-	for k, want := range map[string]any{
-		"type":            "wireguard",
-		"server":          "hub.example.com",
-		"server_port":     float64(51820),
-		"private_key":     peer.PrivateKey,
-		"peer_public_key": st.Inbounds[0].WireGuard.PublicKey,
-		"pre_shared_key":  peer.PresharedKey,
-	} {
-		if wg[k] != want {
-			t.Errorf("outbound[%s] = %v, ожидалось %v", k, wg[k], want)
-		}
+	if wg["type"] != "wireguard" || wg["private_key"] != peer.PrivateKey || wg["address"].([]any)[0] != peer.Address {
+		t.Fatal("некорректные параметры WireGuard endpoint")
 	}
-	if got := wg["local_address"].([]any)[0]; got != peer.Address {
-		t.Errorf("local_address = %v, ожидалось %v", got, peer.Address)
+	remote := wg["peers"].([]any)[0].(map[string]any)
+	if remote["address"] != "hub.example.com" || remote["port"] != float64(51820) ||
+		remote["public_key"] != st.Inbounds[0].WireGuard.PublicKey || remote["pre_shared_key"] != peer.PresharedKey {
+		t.Fatal("некорректные параметры сервера WireGuard")
 	}
 
 	// DNS: внутренняя зона идёт на dnsmasq хаба, остальное — наружу через туннель
 	dns := cfg["dns"].(map[string]any)
 	servers := dns["servers"].([]any)
 	infra := servers[0].(map[string]any)
-	if infra["server"] != "10.89.0.1" || infra["detour"] != "wg-out" {
+	if infra["server"] != "10.89.0.1" || infra["detour"] != "wg-out" || infra["server_port"] != float64(5353) {
 		t.Errorf("infra DNS = %v", infra)
 	}
 	rules := dns["rules"].([]any)
 	rule := rules[0].(map[string]any)
-	if rule["server"] != "infra" || rule["domain_suffix"].([]any)[0] != ".vpn.internal" {
+	if rule["server"] != "infra" || rule["domain_suffix"].([]any)[0] != "vpn.internal" {
 		t.Errorf("правило зоны = %v", rule)
 	}
 
@@ -75,7 +66,7 @@ func TestSingBoxJSONWithoutZoneHasNoRules(t *testing.T) {
 	if _, exists := dns["rules"]; exists {
 		t.Error("без зоны rules не нужен: sing-box ругается на null")
 	}
-	if servers := dns["servers"].([]any); len(servers) != 1 || servers[0].(map[string]any)["tag"] != "default" {
+	if servers := dns["servers"].([]any); len(servers) != 2 || servers[0].(map[string]any)["tag"] != "default" {
 		t.Errorf("без зоны должен остаться только внешний DNS: %v", servers)
 	}
 }
