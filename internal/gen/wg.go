@@ -861,6 +861,35 @@ fi
 	}
 	if len(wgFiles) > 0 {
 		b.WriteString("install -d -m 700 /etc/wireguard\n")
+		// Инфра-интерфейс обновляется без перезапуска: wg syncconf меняет
+		// пиров на живом интерфейсе, не сбрасывая маршруты, NAT и сессии.
+		for _, f := range wgFiles {
+			if f != "wg-infra.conf" {
+				continue
+			}
+			b.WriteString(`
+if ! install -m 600 wg-infra.conf /etc/wireguard/wg-infra.conf 2>/dev/null; then
+  echo "[revhub] не записался /etc/wireguard/wg-infra.conf (только для чтения?)" >&2
+  exit 1
+fi
+if ip link show dev wg-infra >/dev/null 2>&1; then
+  sync_tmp=$(mktemp)
+  if wg-quick strip /etc/wireguard/wg-infra.conf > "$sync_tmp" 2>/dev/null && wg syncconf wg-infra "$sync_tmp"; then
+    rm -f -- "$sync_tmp"
+    echo "[revhub] wg-infra: пиры синхронизированы без перезапуска"
+  else
+    rm -f -- "$sync_tmp"
+    echo "[revhub] wg-infra: syncconf не удался, перезапускаю интерфейс" >&2
+    wg-quick down wg-infra >/dev/null 2>&1 || true
+    wg-quick up wg-infra
+  fi
+else
+  wg-quick up wg-infra
+  echo "[revhub] wg-infra: интерфейс поднят"
+fi
+if [ -d /run/systemd/system ]; then systemctl enable wg-quick@wg-infra.service >/dev/null 2>&1 || true; fi
+`)
+		}
 		// Удалённый из панели туннель оставляет на узле живой интерфейс, его
 		// адрес, метку и таблицу маршрутов. Новый туннель получает те же
 		// значения (адресация считается по состоянию) и падает на
@@ -894,7 +923,7 @@ done
 	}
 	for _, f := range wgFiles {
 		if f == "wg-infra.conf" {
-			continue // применяется после транспортных туннелей
+			continue // синхронизируется выше через wg syncconf
 		}
 		name := strings.TrimSuffix(f, ".conf")
 		// Адрес интерфейса не должен быть занят чужим устройством: wg-quick
@@ -956,47 +985,6 @@ fi
 		fmt.Fprintf(&b, "if [ -d /run/systemd/system ]; then systemctl enable %q >/dev/null 2>&1 || true; fi\n",
 			"wg-quick@"+name+".service")
 	}
-	for _, f := range wgFiles {
-		if f != "wg-infra.conf" {
-			continue
-		}
-		// syncconf применяет только параметры WireGuard. Адрес и хуки
-		// wg-quick требуют переустановки с очисткой по старому конфигу.
-		b.WriteString(`
-(
-infra_config=/etc/wireguard/wg-infra.conf
-infra_tmp=$(mktemp -d)
-trap 'rm -rf -- "$infra_tmp"' EXIT
-infra_quick_fields() {
-  sed -E -n '/^\[Peer\]/q; /^(Address|MTU|Table|DNS|PreUp|PostUp|PreDown|PostDown|SaveConfig)[[:space:]]*=/p' "$1"
-}
-if ip link show dev wg-infra >/dev/null 2>&1 && [ -f "$infra_config" ] &&
-   [ "$(infra_quick_fields "$infra_config")" = "$(infra_quick_fields wg-infra.conf)" ]; then
-  wg-quick strip ./wg-infra.conf > "$infra_tmp/wg-infra.sync"
-  wg syncconf wg-infra "$infra_tmp/wg-infra.sync"
-  install -m 600 wg-infra.conf "$infra_config"
-  echo "[revhub] wg-infra: пиры синхронизированы без перезапуска"
-else
-  if [ -f "$infra_config" ]; then
-    cp -p "$infra_config" "$infra_tmp/wg-infra.previous"
-  fi
-  if ip link show dev wg-infra >/dev/null 2>&1; then
-    wg-quick down wg-infra
-  fi
-  install -m 600 wg-infra.conf "$infra_config"
-  if ! wg-quick up wg-infra; then
-    if [ -f "$infra_tmp/wg-infra.previous" ]; then
-      install -m 600 "$infra_tmp/wg-infra.previous" "$infra_config"
-      wg-quick up wg-infra || true
-    fi
-    exit 1
-  fi
-  echo "[revhub] wg-infra: интерфейс поднят с обновлёнными маршрутами"
-fi
-if [ -d /run/systemd/system ]; then systemctl enable wg-quick@wg-infra.service >/dev/null 2>&1 || true; fi
-)
-`)
-	}
 	if len(kicks) > 0 {
 		// Скрипт и таймер держат сессию без keepalive: пинг уходит только когда
 		// сессии нет. Ставим их после подъёма интерфейсов и сразу дёргаем один раз.
@@ -1039,7 +1027,9 @@ fi
 		// (бывает в контейнерах), применение сети не должно падать целиком.
 		// Пишем предупреждение и продолжаем — сеть важнее зоны имён.
 		b.WriteString(`
-install -d -m 755 /etc/dnsmasq.d /etc/revhub 2>/dev/null || true
+install -d -m 755 /etc/dnsmasq.d 2>/dev/null || true
+# Сохраняем групповую запись в каталог, где панель заменяет state.json.
+mkdir -p /etc/revhub 2>/dev/null || true
 dns_changed=0
 dns_ok=1
 cmp -s dnsmasq-revhub.conf /etc/dnsmasq.d/revhub.conf 2>/dev/null || dns_changed=1

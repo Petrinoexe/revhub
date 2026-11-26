@@ -153,18 +153,3 @@ func TestInfraSubnetWinsOverPrivateBlockAndCatchAll(t *testing.T) {
 		t.Errorf("на узле без инфры infra-правила быть не должно: %+v", d)
 	}
 }
-
-func TestSpecificRouteWinsOverInboundEgress(t *testing.T) {
-	st := model.Demo()
-	st.Inbounds[0].Egress = "tun:eu"
-	st.Routes[0].Domain = []string{"full:example.org"}
-	st.Routes[1].Outbound = model.TagBlock
-	q := Query{Node: "hub", Inbound: st.Inbounds[0].Tag, Domain: "example.org", Network: "tcp"}
-	if d := Check(st, q); d.RuleNum != 1 || d.Outbound != model.TagDirect {
-		t.Fatalf("выход инбаунда перехватил явный маршрут: %+v", d)
-	}
-	q.Domain = "example.net"
-	if d := Check(st, q); d.RuleNum != 0 || d.Outbound != "tun:eu" {
-		t.Fatalf("запасной выход инбаунда не применён: %+v", d)
-	}
-}

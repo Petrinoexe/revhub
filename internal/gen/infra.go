@@ -82,11 +82,6 @@ func InfraWGConf(st model.State, nodeID string) (string, bool, error) {
 	fmt.Fprintf(&b, "PostUp = ip -4 route replace %s dev %%i\n", ic.Subnet)
 	fmt.Fprintf(&b, "PostDown = ip -4 route del %s dev %%i 2>/dev/null || true\n", ic.Subnet)
 
-	// Трафик между пирами всегда использует main, даже если личный
-	// выход пира назначен на другую таблицу или туннель перезапущен.
-	fmt.Fprintf(&b, "PostUp = ip -4 rule add iif %%i to %s lookup main pref 31899\n", ic.Subnet)
-	fmt.Fprintf(&b, "PostDown = ip -4 rule del iif %%i to %s lookup main pref 31899 2>/dev/null || true\n", ic.Subnet)
-
 	table := nftTable(ic.Interface)
 	natTunnels := map[int]bool{}
 	directOverride := false
@@ -97,10 +92,11 @@ func InfraWGConf(st model.State, nodeID string) (string, bool, error) {
 		if !ok || t.FromNode != nodeID {
 			return "", false, fmt.Errorf("инфра: нет включённого туннеля %s на узле %s", name, nodeID)
 		}
-		fmt.Fprintf(&b, "PostUp = ip -4 rule add iif %%i lookup %d pref 32000\n", t.Mark)
-		b.WriteString("PostUp = ip -4 rule add unreachable iif %i pref 32001\n")
-		fmt.Fprintf(&b, "PostDown = ip -4 rule del iif %%i lookup %d pref 32000 2>/dev/null || true\n", t.Mark)
-		b.WriteString("PostDown = ip -4 rule del unreachable iif %i pref 32001 2>/dev/null || true\n")
+		fmt.Fprintf(&b, "PostUp = ip -4 route replace %s dev %%i table %d\n", ic.Subnet, t.Mark)
+		fmt.Fprintf(&b, "PostDown = ip -4 route del %s dev %%i table %d 2>/dev/null || true\n", ic.Subnet, t.Mark)
+		fmt.Fprintf(&b, "PostUp = ip rule del iif %%i lookup %d 2>/dev/null || true; ip rule add iif %%i lookup %d pref 32000\n", t.Mark, t.Mark)
+		fmt.Fprintf(&b, "PostUp = ip -4 route show table %d default | grep -q . || echo \"[revhub] таблица %d без default: туннель %s не поднят, инфра пойдёт напрямую\" >&2\n", t.Mark, t.Mark, name)
+		fmt.Fprintf(&b, "PostDown = ip rule del iif %%i lookup %d 2>/dev/null || true\n", t.Mark)
 		writeTunnelNAT(&b, ic.Subnet, table, t.WGInterface())
 		natTunnels[t.Mark] = true
 	default:
@@ -144,12 +140,9 @@ func InfraWGConf(st model.State, nodeID string) (string, bool, error) {
 		} else {
 			continue
 		}
-		fmt.Fprintf(&b, "PostUp = ip rule add from %s/32 lookup %s pref 31900\n", ip, bucket)
+		fmt.Fprintf(&b, "PostUp = ip rule del from %s/32 lookup %s pref 31900 2>/dev/null || true; ip rule add from %s/32 lookup %s pref 31900\n",
+			ip, bucket, ip, bucket)
 		fmt.Fprintf(&b, "PostDown = ip rule del from %s/32 lookup %s pref 31900 2>/dev/null || true\n", ip, bucket)
-		if bucket != "main" {
-			fmt.Fprintf(&b, "PostUp = ip -4 rule add unreachable iif %%i from %s/32 pref 31901\n", ip)
-			fmt.Fprintf(&b, "PostDown = ip -4 rule del unreachable iif %%i from %s/32 pref 31901 2>/dev/null || true\n", ip)
-		}
 	}
 
 	peers := 0

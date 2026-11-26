@@ -57,16 +57,15 @@ func Check(st model.State, q Query) Decision {
 		}
 	}
 	// Системное правило выхода клиентской сети: inbound.egress рендерится в
-	// routing Xray как запасной вариант перед общим catch-all. Личный client.egress (по
+	// routing Xray выше пользовательских правил. Личный client.egress (по
 	// source-адресу) в dry-run не выражается — в ответе это оговорено.
-	var inboundEgress *Decision
 	if q.Inbound != "" && q.Node != "" {
 		if tags := st.ValidTags(q.Node); len(tags) > 0 {
 			for _, in := range st.Inbounds {
 				if in.Enabled && in.NodeID == q.Node && in.Tag == q.Inbound && in.Egress != "" && tags[in.Egress] {
-					inboundEgress = &Decision{Matched: true, RuleNum: 0, RuleName: "выход сети " + in.Tag,
+					return Decision{Matched: true, RuleNum: 0, RuleName: "выход сети " + in.Tag,
 						Outbound: in.Egress,
-						Reason:   "inbound " + in.Tag + " → " + in.Egress + " (запасной выход сети)"}
+						Reason:   "inbound " + in.Tag + " → " + in.Egress + " (выше правил; личный выход клиента может переопределить)"}
 				}
 			}
 		}
@@ -87,20 +86,12 @@ func Check(st model.State, q Query) Decision {
 		if !ok {
 			continue
 		}
-		if inboundEgress != nil && why == "правило без условий (ловит всё)" {
-			inboundEgress.Uncertain = unc
-			return *inboundEgress
-		}
 		if unknown {
 			unc = append(unc, Uncertain{RuleNum: num, RuleName: r.Name, Why: why})
 			continue
 		}
 		return Decision{Matched: true, RuleNum: num, RuleName: r.Name,
 			Outbound: r.Outbound, Reason: why, Uncertain: unc}
-	}
-	if inboundEgress != nil {
-		inboundEgress.Uncertain = unc
-		return *inboundEgress
 	}
 	return Decision{Matched: false, Outbound: model.TagDirect,
 		Reason: "ни одно правило не совпало → сработает заглушка direct", Uncertain: unc}

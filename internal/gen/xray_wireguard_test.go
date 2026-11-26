@@ -120,19 +120,14 @@ func TestInboundEgressRuleByTag(t *testing.T) {
 	st := wireguardUserState()
 	in := &st.Inbounds[len(st.Inbounds)-1]
 	in.Egress = "tun:eu"
-	st.Routes[0].Domain = []string{"full:example.org"}
 	rules := rulesOf(t, st, "hub")
 	wantTag := in.Tag
 	seen := -1
 	catch := -1
-	explicit := -1
 	for i, r := range rules {
 		m := r.(map[string]any)
 		if tags, ok := m["inboundTag"].([]any); ok && len(tags) == 1 && tags[0] == wantTag && m["outboundTag"] == "tun:eu" {
 			seen = i
-		}
-		if domains, ok := m["domain"].([]any); ok && len(domains) == 1 && domains[0] == "full:example.org" {
-			explicit = i
 		}
 		if m["outboundTag"] == "direct" {
 			if _, ok := m["network"]; ok {
@@ -142,9 +137,6 @@ func TestInboundEgressRuleByTag(t *testing.T) {
 	}
 	if seen < 0 {
 		t.Fatalf("нет правила inboundTag=%s → tun:eu: %v", wantTag, rules)
-	}
-	if explicit < 0 || explicit >= seen {
-		t.Fatal("явный маршрут должен стоять выше запасного выхода инбаунда")
 	}
 	if catch >= 0 && seen > catch {
 		t.Fatal("выход сети должен стоять выше direct-заглушки")

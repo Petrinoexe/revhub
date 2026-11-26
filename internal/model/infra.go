@@ -1,6 +1,7 @@
 package model
 
 import (
+	"net"
 	"net/netip"
 	"strings"
 )
@@ -39,10 +40,10 @@ type InfraConfig struct {
 // ServerAddress — адрес хаба в инфра-подсети (.1).
 func (ic InfraConfig) ServerAddress() string {
 	p, err := netip.ParsePrefix(ic.Subnet)
-	if err != nil || !p.Addr().Is4() {
+	if err != nil {
 		return ""
 	}
-	return p.Masked().Addr().Next().String()
+	return p.Addr().Next().String()
 }
 
 // InfraPeer — машина инфраструктуры: ключи, адрес, имя.
@@ -76,13 +77,8 @@ func (s *State) normalizeInfra() {
 		return
 	}
 	ic := s.Infra
-	if ic.NodeID == "" {
-		if s.Panel != nil {
-			ic.NodeID = s.Panel.NodeID
-		}
-		if ic.NodeID == "" && len(s.Nodes) > 0 {
-			ic.NodeID = s.Nodes[0].ID
-		}
+	if ic.Interface == "" {
+		ic.Interface = DefaultInfraInterface
 	}
 	// Имя интерфейса фиксировано: apply.sh узнаёт инфра-конфиг по файлу
 	// wg-infra.conf и синхронизирует пиров через wg syncconf без перезапуска.
@@ -97,18 +93,15 @@ func (s *State) normalizeInfra() {
 		fillWGKeys(&ic.PrivateKey, &ic.PublicKey)
 	}
 
-	// Первый и последний адреса подсети заняты сетью и broadcast.
+	// Автовыдача адресов пирам: первый свободный со .2 (адрес хаба — .1).
 	p, err := netip.ParsePrefix(ic.Subnet)
-	if err != nil || !p.Addr().Is4() || p.Bits() < 8 || p.Bits() > 30 {
+	if err != nil {
 		return
 	}
-	p = p.Masked()
-	ic.Subnet = p.String()
-	next := p.Addr().Next().Next()
-	taken := map[netip.Addr]bool{}
-	for _, pr := range s.InfraPeers {
-		if addr, err := netip.ParsePrefix(pr.Address); err == nil && p.Contains(addr.Addr()) {
-			taken[addr.Addr()] = true
+	taken := map[byte]bool{1: true} // .1 — сервер
+	for _, p2 := range s.InfraPeers {
+		if a, err := netip.ParsePrefix(p2.Address); err == nil && p.Contains(a.Addr()) {
+			taken[a.Addr().As4()[3]] = true
 		}
 	}
 	for i := range s.InfraPeers {
@@ -129,13 +122,15 @@ func (s *State) normalizeInfra() {
 		if pr.Address != "" {
 			continue
 		}
-		for p.Contains(next.Next()) {
-			addr := next
-			next = next.Next()
-			if !taken[addr] {
-				pr.Address = netip.PrefixFrom(addr, 32).String()
-				break
+		for n := 2; n < 255; n++ {
+			if taken[byte(n)] {
+				continue
 			}
+			ip := net.IP(p.Addr().AsSlice()).To4()
+			ip[3] = byte(n)
+			pr.Address = ip.String() + "/32"
+			taken[byte(n)] = true
+			break
 		}
 	}
 }
@@ -147,7 +142,7 @@ func (s State) validateInfra(add func(string, ...any)) {
 	if ic == nil || !ic.Enabled {
 		return
 	}
-	if !nodesHasID(s, ic.NodeID) {
+	if !nodesHasID(s, ic.NodeID) && ic.NodeID != "" {
 		add("инфра: узел %q не найден", ic.NodeID)
 	}
 	if ic.Interface == "" {
@@ -181,8 +176,7 @@ func (s State) validateInfra(add func(string, ...any)) {
 		name, ok := strings.CutPrefix(ic.Egress, TagTunnel)
 		found := false
 		for _, t := range s.Tunnels {
-			if t.Enabled && t.Name == name && t.FromNode == ic.NodeID &&
-				(t.Kind == TunnelWG || t.Kind == TunnelWGReverse) {
+			if t.Enabled && t.Name == name && t.FromNode == ic.NodeID {
 				found = true
 			}
 		}
@@ -202,12 +196,7 @@ func (s State) validateInfra(add func(string, ...any)) {
 			continue
 		}
 		addr, err := netip.ParsePrefix(pr.Address)
-		if pr.Address == "" {
-			add("%s: в подсети %s нет свободных адресов", who, ic.Subnet)
-			continue
-		}
-		if err != nil || addr.Bits() != 32 || !p.Contains(addr.Addr()) ||
-			addr.Addr() == p.Masked().Addr() || !p.Contains(addr.Addr().Next()) {
+		if err != nil || addr.Bits() != 32 || !p.Contains(addr.Addr()) {
 			add("%s: неверный адрес %q", who, pr.Address)
 			continue
 		}
@@ -227,8 +216,7 @@ func (s State) validateInfra(add func(string, ...any)) {
 			name, ok := strings.CutPrefix(pr.Egress, TagTunnel)
 			found := false
 			for _, t := range s.Tunnels {
-				if t.Enabled && t.Name == name && t.FromNode == ic.NodeID &&
-					(t.Kind == TunnelWG || t.Kind == TunnelWGReverse) {
+				if t.Enabled && t.Name == name && t.FromNode == ic.NodeID {
 					found = true
 				}
 			}

@@ -197,7 +197,7 @@ async function save(){
   try{
     ST = await api('/api/state',{method:'PUT',headers:{'content-type':'application/json'},body:JSON.stringify(ST)});
     toast('Сохранено, применяю на узлы…');
-  }catch(e){ toast('Не сохранилось:\n'+e.message, true); return; }
+  }catch(e){ toast('Не сохранилось:\n'+e.message, true); }
   render();
   waitApply();
 }
@@ -254,7 +254,6 @@ function renderApplyBar(){
   const bad = (APPLY.nodes||[]).filter(n=>!n.ok && !n.skipped);
   if(APPLY.running){ el.textContent = '⟳ применяю…'; el.className = 'pill run'; }
   else if(bad.length){ el.textContent = `✗ не применилось: ${bad.length} · подробности`; el.className = 'pill err'; }
-  else if((APPLY.nodes||[]).some(n=>n.skipped)){ el.textContent = 'есть пропущенные узлы · подробности'; el.className = 'pill'; }
   else if((APPLY.nodes||[]).length){ el.textContent = '✓ применено'; el.className = 'pill ok'; }
   else { el.textContent = ''; el.className = 'pill'; }
 }
@@ -298,8 +297,7 @@ async function waitApply(){
   if(bad.length){
     toast('применено не всё:\n' + bad.map(n=>`${n.name||n.node_id}: ${n.err}`).join('\n'), true);
   } else if(APPLY && !APPLY.running){
-    const skipped = (APPLY.nodes||[]).filter(n=>n.skipped);
-    toast(skipped.length ? 'Пропущены узлы: '+skipped.map(n=>n.name||n.node_id).join(', ') : 'применено ✓', skipped.length>0);
+    toast('применено ✓');
   }
   await load();
 }
@@ -864,7 +862,7 @@ function setDNS(key,value){ dnsConf()[key] = value; }
 // ---------- инфраструктурная сеть
 
 function infraCfg(){
-  if(!ST.infra) ST.infra = {enabled:false,node_id:ST.panel?.node_id || LOCAL_NODE || ST.nodes?.[0]?.id || '',subnet:'10.89.0.0/24',listen_port:51840,egress:''};
+  if(!ST.infra) ST.infra = {enabled:false,node_id:'',subnet:'10.89.0.0/24',listen_port:51840,egress:''};
   return ST.infra;
 }
 function setInfra(k,v){ infraCfg()[k]=v; }
@@ -878,9 +876,7 @@ function setInfraPeer(i,k,v){ ST.infra_peers[i][k]=v; }
 
 function infraEgressOpts(cur){
   const opts=[['','как у сети'],['direct','direct — NAT хаба']];
-  (ST.tunnels||[]).filter(t=>t.enabled && t.from_node_id===(infraCfg().node_id || ST.panel?.node_id || ST.nodes?.[0]?.id) &&
-    (t.kind==='wg' || t.kind==='wg-reverse')).forEach(t=>opts.push(['tun:'+t.name,'tun:'+t.name]));
-  if(cur && !opts.some(([value])=>value===cur)) opts.push([cur, cur+' (недоступен)']);
+  (ST.tunnels||[]).filter(t=>t.enabled).forEach(t=>opts.push(['tun:'+t.name,'tun:'+t.name]));
   return opts.map(([v,l])=>`<option value="${esc(v)}"${v===(cur||'')?' selected':''}>${esc(l)}</option>`).join('');
 }
 
@@ -892,7 +888,7 @@ function renderInfra(v){
     <div class="card"><div class="body">
       <div class="row">
         <label><input type="checkbox" ${ic.enabled?'checked':''} onchange="setInfra('enabled',this.checked);render()"> включена</label>
-        <label>узел: <select onchange="setInfra('node_id',this.value);render()"><option value="">Узел панели</option>${nodes}</select></label>
+        <label>узел: <select onchange="setInfra('node_id',this.value)"><option value="">—</option>${nodes}</select></label>
         <label>подсеть: <input value="${esc(ic.subnet||'')}" oninput="setInfra('subnet',this.value)" style="width:130px"></label>
         <label>порт: <input type="number" value="${ic.listen_port||51840}" oninput="setInfra('listen_port',+this.value)" style="width:80px"></label>
         <label>выход: <select onchange="setInfra('egress',this.value)">${infraEgressOpts(ic.egress)}</select></label>
@@ -907,7 +903,7 @@ function renderInfra(v){
         <td class="mut">${esc(p.address||'выдастся при сохранении')}</td>
         <td><input type="checkbox" ${p.enabled!==false?'checked':''} onchange="setInfraPeer(${i},'enabled',this.checked)"></td>
         <td><select onchange="setInfraPeer(${i},'egress',this.value)">${infraEgressOpts(p.egress)}</select></td>
-        <td>${p.id && p.enabled && ic.enabled ? `<a class="b" href="/api/infra/${encodeURIComponent(p.id)}/wg-conf">wg</a>` : ''}
+        <td><a class="b" href="/api/infra/${encodeURIComponent(p.id||p.name||'')}/wg-conf">wg</a>
             <button class="b" onclick="delInfraPeer(${i})">×</button></td>
       </tr>`).join('')}
     </tbody></table>`:'<div class="mut">пиров пока нет</div>'}`;
