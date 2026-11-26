@@ -56,6 +56,20 @@ func Check(st model.State, q Query) Decision {
 				Reason:   "адрес в инфра-подсети " + subnet + " → freedom infra (приоритет над правилами и блокировкой приватных)"}
 		}
 	}
+	// Системное правило выхода клиентской сети: inbound.egress рендерится в
+	// routing Xray выше пользовательских правил. Личный client.egress (по
+	// source-адресу) в dry-run не выражается — в ответе это оговорено.
+	if q.Inbound != "" && q.Node != "" {
+		if tags := st.ValidTags(q.Node); len(tags) > 0 {
+			for _, in := range st.Inbounds {
+				if in.Enabled && in.NodeID == q.Node && in.Tag == q.Inbound && in.Egress != "" && tags[in.Egress] {
+					return Decision{Matched: true, RuleNum: 0, RuleName: "выход сети " + in.Tag,
+						Outbound: in.Egress,
+						Reason:   "inbound " + in.Tag + " → " + in.Egress + " (выше правил; личный выход клиента может переопределить)"}
+				}
+			}
+		}
+	}
 	var unc []Uncertain
 	num := 0
 	for _, r := range st.Routes {

@@ -441,6 +441,19 @@ func buildRules(st model.State, nodeID string) ([]any, error) {
 			}
 		}
 	}
+	// Выход клиентской сети (карточка «Маршруты» → inbound.egress): трафик
+	// инбаунда целиком, если клиент не переопределил выход лично. Раньше это
+	// применял ядерный wgc-интерфейс; теперь — inboundTag в routing Xray.
+	if tags := st.ValidTags(nodeID); len(tags) > 0 {
+		for _, in := range st.Inbounds {
+			if !in.Enabled || in.NodeID != nodeID || in.Egress == "" || !tags[in.Egress] {
+				continue
+			}
+			rules = append(rules, map[string]any{
+				"type": "field", "inboundTag": []string{in.Tag}, "outboundTag": in.Egress,
+			})
+		}
+	}
 	catchAll := false
 	for _, r := range st.Routes {
 		if !r.Enabled || (r.NodeID != "" && r.NodeID != nodeID) {

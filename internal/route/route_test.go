@@ -6,6 +6,16 @@ import (
 	"revhub/internal/model"
 )
 
+func TestInboundEgressDecision(t *testing.T) {
+	st := model.Demo()
+	in := st.Inbounds[0]
+	in.Egress = "tun:eu"
+	d := Check(st, Query{Node: "hub", Inbound: in.Tag, Domain: "example.com", Network: "tcp"})
+	if !d.Matched || d.Outbound != "tun:eu" {
+		t.Fatalf("inbound.egress должен дать tun:eu, получено %+v", d)
+	}
+}
+
 func TestGeositeReportedAsUncertainNotAsMatch(t *testing.T) {
 	st := model.Demo()
 	d := Check(st, Query{Node: "hub", User: "alice@revhub", Domain: "sberbank.ru", Port: "443", Network: "tcp"})

@@ -114,7 +114,60 @@ func TestNoDNSWithoutKernelInterface(t *testing.T) {
 	}
 }
 
-// Личный выход клиента при userspace-WG задаётся правилом по source IP.
+// Выход клиентской сети живёт в inbound.egress и рендерится системным
+// правилом по inboundTag выше пользовательских маршрутов.
+func TestInboundEgressRuleByTag(t *testing.T) {
+	st := wireguardUserState()
+	in := &st.Inbounds[len(st.Inbounds)-1]
+	in.Egress = "tun:eu"
+	rules := rulesOf(t, st, "hub")
+	wantTag := in.Tag
+	seen := -1
+	catch := -1
+	for i, r := range rules {
+		m := r.(map[string]any)
+		if tags, ok := m["inboundTag"].([]any); ok && len(tags) == 1 && tags[0] == wantTag && m["outboundTag"] == "tun:eu" {
+			seen = i
+		}
+		if m["outboundTag"] == "direct" {
+			if _, ok := m["network"]; ok {
+				catch = i
+			}
+		}
+	}
+	if seen < 0 {
+		t.Fatalf("нет правила inboundTag=%s → tun:eu: %v", wantTag, rules)
+	}
+	if catch >= 0 && seen > catch {
+		t.Fatal("выход сети должен стоять выше direct-заглушки")
+	}
+}
+
+// Личный выход клиента (source) важнее выхода всей сети.
+func TestClientEgressBeatsInboundEgress(t *testing.T) {
+	st := wireguardUserState()
+	in := &st.Inbounds[len(st.Inbounds)-1]
+	in.Egress = "tun:eu"
+	st.Clients[0].Egress = model.TagDirect
+	rules := rulesOf(t, st, "hub")
+	src, inb := -1, -1
+	for i, r := range rules {
+		m := r.(map[string]any)
+		if _, ok := m["source"]; ok && m["outboundTag"] == model.TagDirect {
+			src = i
+		}
+		if _, ok := m["inboundTag"]; ok && m["outboundTag"] == "tun:eu" {
+			inb = i
+		}
+	}
+	if src < 0 || inb < 0 {
+		t.Fatalf("правила не найдены: source=%d inbound=%d %v", src, inb, rules)
+	}
+	if src > inb {
+		t.Fatal("личный выход клиента должен стоять выше выхода сети")
+	}
+}
+
 func TestClientEgressRuleBySource(t *testing.T) {
 	st := wireguardUserState()
 	st.Clients[0].Egress = "tun:eu"
