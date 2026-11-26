@@ -4,7 +4,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"revhub/internal/model"
 	"revhub/internal/store"
@@ -173,4 +175,47 @@ func TestApplyRenderErrorIsFailureNotSkip(t *testing.T) {
 	if !strings.Contains(res.Err, "ключ") {
 		t.Fatalf("причина не названа: %q", res.Err)
 	}
+}
+
+func TestSaveDuringApplyRunsAgainWithLatestState(t *testing.T) {
+	helper := writeHelper(t, "#!/bin/sh\nexit 0\n")
+	svc, _ := newService(t, helper, model.Node{ID: "hub", Name: "Старое имя"})
+	first := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	svc.Logf = func(string) {
+		once.Do(func() {
+			close(first)
+			<-release
+		})
+	}
+
+	svc.Start("manual")
+	select {
+	case <-first:
+	case <-time.After(5 * time.Second):
+		close(release)
+		t.Fatal("первое применение не дошло до отчёта")
+	}
+	if err := svc.Store.Patch(func(st *model.State) error {
+		st.Nodes[0].Name = "Новое имя"
+		return nil
+	}); err != nil {
+		close(release)
+		t.Fatal(err)
+	}
+	svc.Start("save")
+	close(release)
+
+	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); {
+		report := svc.Last()
+		if !report.Running {
+			if report.Reason != "save" || len(report.Nodes) != 1 || report.Nodes[0].Name != "Новое имя" || !report.Nodes[0].OK {
+				t.Fatalf("последнее состояние не применилось: %+v", report)
+			}
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatal("повторное применение не завершилось")
 }

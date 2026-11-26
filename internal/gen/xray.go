@@ -407,7 +407,8 @@ func streamSettings(o streamOpts) (map[string]any, error) {
 	return ss, nil
 }
 
-// buildRules: api → системное правило инфры → правила модели → заглушка direct.
+// buildRules: API, инфра, личные выходы и правила модели. Перед общим
+// правилом без условий стоит запасной выход конкретного инбаунда.
 // Инфра-подсеть матчится ДО всех пользовательских правил: иначе общая
 // блокировка приватных IP или catch-all перехватили бы доступ к инфре (§5 ТЗ).
 func buildRules(st model.State, nodeID string) ([]any, error) {
@@ -444,12 +445,13 @@ func buildRules(st model.State, nodeID string) ([]any, error) {
 	// Выход клиентской сети (карточка «Маршруты» → inbound.egress): трафик
 	// инбаунда целиком, если клиент не переопределил выход лично. Раньше это
 	// применял ядерный wgc-интерфейс; теперь — inboundTag в routing Xray.
+	var inboundEgress []any
 	if tags := st.ValidTags(nodeID); len(tags) > 0 {
 		for _, in := range st.Inbounds {
 			if !in.Enabled || in.NodeID != nodeID || in.Egress == "" || !tags[in.Egress] {
 				continue
 			}
-			rules = append(rules, map[string]any{
+			inboundEgress = append(inboundEgress, map[string]any{
 				"type": "field", "inboundTag": []string{in.Tag}, "outboundTag": in.Egress,
 			})
 		}
@@ -498,11 +500,15 @@ func buildRules(st model.State, nodeID string) ([]any, error) {
 			// xray отвергает правило без единого поля ("no effective fields"),
 			// поэтому catch-all выражается явным network.
 			rule["network"] = "tcp,udp"
-			catchAll = true
+			if !catchAll {
+				rules = append(rules, inboundEgress...)
+				catchAll = true
+			}
 		}
 		rules = append(rules, rule)
 	}
 	if !catchAll {
+		rules = append(rules, inboundEgress...)
 		rules = append(rules, map[string]any{
 			"type": "field", "network": "tcp,udp", "outboundTag": model.TagDirect,
 		})

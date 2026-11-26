@@ -47,9 +47,10 @@ type Service struct {
 	Timeout   time.Duration
 	Logf      func(string)
 
-	mu   sync.Mutex
-	busy bool
-	last Report
+	mu      sync.Mutex
+	busy    bool
+	pending string
+	last    Report
 }
 
 // NodeResult — итог применения на одном узле.
@@ -94,27 +95,49 @@ func (s *Service) Last() Report {
 	return out
 }
 
-// Start запускает применение в фоне. Если уже идёт — возвращает текущее.
+// Start запускает применение в фоне. Сохранения во время применения
+// объединяются в один следующий проход по свежему состоянию.
 func (s *Service) Start(reason string) Report {
 	s.mu.Lock()
-	if s.busy {
-		out := s.last
-		s.mu.Unlock()
-		return out
+	defer s.mu.Unlock()
+	if reason == "" {
+		reason = "manual"
 	}
+	if s.busy {
+		s.pending = reason
+		return s.last
+	}
+	s.beginLocked(reason)
+	go s.runPending(reason)
+	return s.last
+}
+
+func (s *Service) beginLocked(reason string) {
 	s.busy = true
 	s.last = Report{Running: true, Reason: reason, StartedAt: time.Now().UTC()}
-	s.mu.Unlock()
+}
 
-	go func() {
-		s.run(reason)
+func (s *Service) runPending(reason string) {
+	for reason != "" {
+		s.run()
 		s.mu.Lock()
-		s.busy = false
-		s.last.Running = false
-		s.last.FinishedAt = time.Now().UTC()
+		reason, _ = s.finishLocked()
 		s.mu.Unlock()
-	}()
-	return s.Last()
+	}
+}
+
+// finishLocked завершает текущий отчёт и передаёт очередь следующему проходу.
+func (s *Service) finishLocked() (string, Report) {
+	s.last.Running = false
+	s.last.FinishedAt = time.Now().UTC()
+	finished := s.last
+	next := s.pending
+	s.pending = ""
+	s.busy = false
+	if next != "" {
+		s.beginLocked(next)
+	}
+	return next, finished
 }
 
 // ApplyNow — синхронное применение (кнопка «применить сейчас»).
@@ -125,22 +148,21 @@ func (s *Service) ApplyNow(reason string) Report {
 		s.mu.Unlock()
 		return out
 	}
-	s.busy = true
-	s.last = Report{Running: true, Reason: reason, StartedAt: time.Now().UTC()}
+	s.beginLocked(reason)
 	s.mu.Unlock()
 
-	s.run(reason)
+	s.run()
 
 	s.mu.Lock()
-	s.busy = false
-	s.last.Running = false
-	s.last.FinishedAt = time.Now().UTC()
-	out := s.last
+	next, out := s.finishLocked()
 	s.mu.Unlock()
+	if next != "" {
+		go s.runPending(next)
+	}
 	return out
 }
 
-func (s *Service) run(reason string) {
+func (s *Service) run() {
 	st := s.Store.Snapshot()
 	for _, n := range st.Nodes {
 		res := s.applyNode(st, n)
@@ -159,7 +181,13 @@ func (s *Service) ApplyNode(nodeID string) (NodeResult, error) {
 	s.mu.Unlock()
 	defer func() {
 		s.mu.Lock()
+		next := s.pending
+		s.pending = ""
 		s.busy = false
+		if next != "" {
+			s.beginLocked(next)
+			go s.runPending(next)
+		}
 		s.mu.Unlock()
 	}()
 

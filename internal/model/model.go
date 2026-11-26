@@ -509,8 +509,8 @@ func (s *State) Normalize() {
 	}
 	s.assignWireGuardPorts()
 	s.normalizeWireGuardPeers()
-	s.normalizeDNS()
 	s.normalizeInfra()
+	s.normalizeDNS()
 }
 
 // ValidTags возвращает теги исходящих, существующие на узле. Тег туннеля

@@ -130,3 +130,19 @@ func TestInfraPeerKeysUniqueFromServer(t *testing.T) {
 		t.Fatalf("повтор ключа сервера принят: %v", err)
 	}
 }
+
+func TestInfraAllocatesPeersInNonzeroSubnet(t *testing.T) {
+	st := infraState()
+	st.Infra.NodeID = ""
+	st.Infra.Subnet = "10.89.0.129/29"
+	st.InfraPeers = []InfraPeer{{Name: "srv-db", Enabled: true}, {Name: "srv-app", Enabled: true}}
+	st.Normalize()
+	if err := st.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if st.Infra.NodeID != "hub" || st.Infra.ServerAddress() != "10.89.0.129" ||
+		st.InfraPeers[0].Address != "10.89.0.130/32" || st.InfraPeers[1].Address != "10.89.0.131/32" {
+		t.Fatalf("неожиданная конфигурация сети %s на %s, сервер %s, пиры %s и %s",
+			st.Infra.Subnet, st.Infra.NodeID, st.Infra.ServerAddress(), st.InfraPeers[0].Address, st.InfraPeers[1].Address)
+	}
+}
