@@ -114,3 +114,32 @@ func TestDisabledRuleSkipped(t *testing.T) {
 		t.Errorf("выключенное правило не должно попадать в претенденты, получено %+v", d.Uncertain)
 	}
 }
+
+func TestInfraSubnetWinsOverPrivateBlockAndCatchAll(t *testing.T) {
+	st := model.Demo()
+	st.Infra = &model.InfraConfig{Enabled: true, NodeID: "hub"}
+	st.Normalize()
+	// Блок приватных + catch-all в туннель: адрес инфры всё равно в infra.
+	st.Routes = []model.Rule{
+		{ID: "a", Name: "блок приватных", Enabled: true,
+			IP: []string{"10.0.0.0/8"}, Outbound: model.TagBlock},
+		{ID: "b", Name: "всё в туннель", Enabled: true, Outbound: "tun:eu"},
+	}
+	d := Check(st, Query{Node: "hub", IP: "10.89.0.5", Port: "5432", Network: "tcp"})
+	if !d.Matched || d.Outbound != model.TagInfra {
+		t.Fatalf("инфра-адрес должен уйти в infra, получено %+v", d)
+	}
+	if len(d.Uncertain) != 0 {
+		t.Errorf("системное правило инфры не должно иметь претендентов: %+v", d.Uncertain)
+	}
+	// Адрес вне инфры — обычный порядок: блок приватных.
+	d = Check(st, Query{Node: "hub", IP: "10.55.0.1", Network: "tcp"})
+	if d.Outbound != model.TagBlock || d.RuleNum != 1 {
+		t.Errorf("чужой приватный адрес должен попасть в block: %+v", d)
+	}
+	// На узле без инфры адрес инфра-подсети — обычная маршрутизация.
+	d = Check(st, Query{Node: "exit-eu", IP: "10.89.0.5", Network: "tcp"})
+	if d.Outbound == model.TagInfra {
+		t.Errorf("на узле без инфры infra-правила быть не должно: %+v", d)
+	}
+}

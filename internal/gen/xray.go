@@ -39,6 +39,12 @@ func XrayConfig(st model.State, nodeID string) (map[string]any, error) {
 		map[string]any{"protocol": "freedom", "tag": model.TagDirect},
 		map[string]any{"protocol": "blackhole", "tag": model.TagBlock},
 	}
+	if st.InfraSubnet(nodeID) != "" {
+		// Трафик в инфраструктуру — напрямую, без меток: дальше по main-таблице
+		// его доставит системный wg-infra. Никаких mark: иначе пакеты ушли бы
+		// в туннельный fwmark-маршрут, а не в инфра-подсеть.
+		outbounds = append(outbounds, map[string]any{"protocol": "freedom", "tag": model.TagInfra})
+	}
 
 	for _, t := range st.Tunnels {
 		if !t.Enabled || !t.Touches(nodeID) {
@@ -369,11 +375,18 @@ func streamSettings(o streamOpts) (map[string]any, error) {
 	return ss, nil
 }
 
-// buildRules: api → правила модели по порядку → заглушка direct.
+// buildRules: api → системное правило инфры → правила модели → заглушка direct.
+// Инфра-подсеть матчится ДО всех пользовательских правил: иначе общая
+// блокировка приватных IP или catch-all перехватили бы доступ к инфре (§5 ТЗ).
 func buildRules(st model.State, nodeID string) ([]any, error) {
 	rules := []any{map[string]any{
 		"type": "field", "inboundTag": []string{apiTag}, "outboundTag": apiTag,
 	}}
+	if subnet := st.InfraSubnet(nodeID); subnet != "" {
+		rules = append(rules, map[string]any{
+			"type": "field", "ip": []string{subnet}, "outboundTag": model.TagInfra,
+		})
+	}
 	catchAll := false
 	for _, r := range st.Routes {
 		if !r.Enabled || (r.NodeID != "" && r.NodeID != nodeID) {

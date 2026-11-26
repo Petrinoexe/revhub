@@ -90,11 +90,21 @@ func Artifacts(st model.State, nodeID string) ([]File, error) {
 		wgNames = append(wgNames, name)
 	}
 	sort.Strings(wgNames)
+	// Инфраструктурная сеть — отдельный интерфейс и отдельная подсеть.
+	infraConf, infraOn, err := InfraWGConf(st, nodeID)
+	if err != nil {
+		return nil, err
+	}
+	if infraOn {
+		files = append(files, File{Name: "wg-infra.conf", Content: infraConf, Mode: 0o600})
+		wgNames = append(wgNames, "wg-infra.conf")
+		sort.Strings(wgNames)
+	}
 	useXray := len(wgNames) == 0 || NeedsXray(st, nodeID)
 	// Узел выпускает трафик туннеля в интернет — значит, ему нужен ip_forward
 	// не только до перезагрузки: PostUp wg-quick выставляет его в рантайме, но
 	// systemd-sysctl при загрузке может вернуть 0, и туннель «поднят, но не водит».
-	forward := false
+	forward := infraOn
 	for _, t := range st.Tunnels {
 		if t.Enabled && t.ToNode == nodeID && t.ForwardPolicy &&
 			(t.Kind == model.TunnelWG || t.Kind == model.TunnelWGReverse) {
@@ -163,6 +173,9 @@ func NodePorts(st model.State, nodeID string) []string {
 			proto = "udp"
 		}
 		add(in.Port, proto)
+	}
+	if st.Infra != nil && st.Infra.Enabled && st.Infra.NodeID == nodeID {
+		add(st.Infra.ListenPort, "udp")
 	}
 	// Панель, открытая наружу, тоже должна быть в списке портов: иначе ufw
 	// останется закрытым и «снаружи не открывается» будет выглядеть как баг.
@@ -843,6 +856,35 @@ fi
 	}
 	if len(wgFiles) > 0 {
 		b.WriteString("install -d -m 700 /etc/wireguard\n")
+		// Инфра-интерфейс обновляется без перезапуска: wg syncconf меняет
+		// пиров на живом интерфейсе, не сбрасывая маршруты, NAT и сессии.
+		for _, f := range wgFiles {
+			if f != "wg-infra.conf" {
+				continue
+			}
+			b.WriteString(`
+if ! install -m 600 wg-infra.conf /etc/wireguard/wg-infra.conf 2>/dev/null; then
+  echo "[revhub] не записался /etc/wireguard/wg-infra.conf (только для чтения?)" >&2
+  exit 1
+fi
+if ip link show dev wg-infra >/dev/null 2>&1; then
+  sync_tmp=$(mktemp)
+  if wg-quick strip /etc/wireguard/wg-infra.conf > "$sync_tmp" 2>/dev/null && wg syncconf wg-infra "$sync_tmp"; then
+    rm -f -- "$sync_tmp"
+    echo "[revhub] wg-infra: пиры синхронизированы без перезапуска"
+  else
+    rm -f -- "$sync_tmp"
+    echo "[revhub] wg-infra: syncconf не удался, перезапускаю интерфейс" >&2
+    wg-quick down wg-infra >/dev/null 2>&1 || true
+    wg-quick up wg-infra
+  fi
+else
+  wg-quick up wg-infra
+  echo "[revhub] wg-infra: интерфейс поднят"
+fi
+if [ -d /run/systemd/system ]; then systemctl enable wg-quick@wg-infra.service >/dev/null 2>&1 || true; fi
+`)
+		}
 		// Удалённый из панели туннель оставляет на узле живой интерфейс, его
 		// адрес, метку и таблицу маршрутов. Новый туннель получает те же
 		// значения (адресация считается по состоянию) и падает на
@@ -875,6 +917,9 @@ done
 `)
 	}
 	for _, f := range wgFiles {
+		if f == "wg-infra.conf" {
+			continue // синхронизируется выше через wg syncconf
+		}
 		name := strings.TrimSuffix(f, ".conf")
 		// Адрес интерфейса не должен быть занят чужим устройством: wg-quick
 		// успевает создать интерфейс и падает уже на «ip address add» с

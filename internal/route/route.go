@@ -46,6 +46,16 @@ type Decision struct {
 // Check возвращает точный матч и правила-претенденты с непроверяемыми
 // условиями, стоящие выше него.
 func Check(st model.State, q Query) Decision {
+	// Системное правило xray: инфра-подсеть → freedom infra — стоит в конфиге
+	// выше всех пользовательских правил (§5 ТЗ). Проверяем его до их цикла,
+	// иначе dry-run врал бы против реального поведения ядра.
+	if subnet := st.InfraSubnet(q.Node); subnet != "" && q.IP != "" {
+		if _, ipnet, err := net.ParseCIDR(subnet); err == nil && ipnet.Contains(net.ParseIP(q.IP)) {
+			return Decision{Matched: true, RuleNum: 0, RuleName: "инфраструктура",
+				Outbound: model.TagInfra,
+				Reason:   "адрес в инфра-подсети " + subnet + " → freedom infra (приоритет над правилами и блокировкой приватных)"}
+		}
+	}
 	var unc []Uncertain
 	num := 0
 	for _, r := range st.Routes {

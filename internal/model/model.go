@@ -32,7 +32,8 @@ const (
 const (
 	TagDirect = "direct"
 	TagBlock  = "block"
-	TagTunnel = "tun:" // + имя туннеля
+	TagInfra  = "infra" // freedom-outbound в инфраструктурную сеть
+	TagTunnel = "tun:"  // + имя туннеля
 )
 
 type State struct {
@@ -45,6 +46,10 @@ type State struct {
 
 	DNS   *DNSConfig   `json:"dns,omitempty"`   // зона имён внутри WireGuard
 	Panel *PanelConfig `json:"panel,omitempty"` // где слушает панель
+
+	// Инфраструктурная сеть — отдельный системный WG-интерфейс для серверов.
+	Infra      *InfraConfig `json:"infra,omitempty"`
+	InfraPeers []InfraPeer  `json:"infra_peers,omitempty"`
 }
 
 type Node struct {
@@ -508,6 +513,7 @@ func (s *State) Normalize() {
 	s.normalizeWireGuardPeers()
 	s.normalizeDNSHostnames()
 	s.normalizeDNS()
+	s.normalizeInfra()
 }
 
 // ValidTags возвращает теги исходящих, существующие на узле. Тег туннеля
@@ -515,12 +521,24 @@ func (s *State) Normalize() {
 // интерфейсом, и объекта в xray там нет.
 func (s State) ValidTags(nodeID string) map[string]bool {
 	m := map[string]bool{TagDirect: true, TagBlock: true}
+	if s.Infra != nil && s.Infra.Enabled && s.Infra.NodeID == nodeID {
+		m[TagInfra] = true
+	}
 	for _, t := range s.Tunnels {
 		if t.Enabled && t.FromNode == nodeID {
 			m[t.Tag()] = true
 		}
 	}
 	return m
+}
+
+// InfraSubnet — подсеть инфраструктуры на этом узле ("" если сеть выключена
+// или живёт на другом узле). Одно место для xray-правила и dry-run.
+func (s State) InfraSubnet(nodeID string) string {
+	if s.Infra != nil && s.Infra.Enabled && s.Infra.NodeID == nodeID {
+		return s.Infra.Subnet
+	}
+	return ""
 }
 
 // HasInboundTag учитывает обычные инбаунды и принимающую сторону VLESS-туннеля.
@@ -574,6 +592,7 @@ func (s State) Validate() error {
 
 	s.validateDNS(add)
 	s.validatePanel(add)
+	s.validateInfra(add)
 
 	tags := map[string]bool{}
 	for i, in := range s.Inbounds {

@@ -70,6 +70,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/wg-conf/{inbound}", s.wgConfigFile)
 	mux.HandleFunc("GET /api/dns", s.dnsStatus)
 	mux.HandleFunc("GET /api/dns/check", s.dnsCheck)
+	mux.HandleFunc("GET /api/infra/{peer}/wg-conf", s.infraPeerConfig)
 	mux.HandleFunc("POST /api/panel/restart", s.panelRestart)
 	mux.HandleFunc("POST /api/node/secret", s.setSecret)
 	mux.HandleFunc("POST /api/node/provision", s.provisionNode)

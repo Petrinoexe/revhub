@@ -77,7 +77,7 @@
 const TABS = [
   ['nodes','Узлы'],['inbounds','Инбаунды'],['tunnels','Туннели'],
   ['clients','Клиенты'],['routes','Маршруты'],['dns','DNS'],
-  ['panel','Панель'],['check','Проверка маршрута']
+  ['infra','Инфра'],['panel','Панель'],['check','Проверка маршрута']
 ];
 
 const SCHEMA = {
@@ -242,6 +242,7 @@ function render(){
   if(!ST){ v.textContent='загрузка…'; return; }
   if(TAB==='check') return renderCheck(v);
   if(TAB==='dns') return renderDNS(v);
+  if(TAB==='infra') return renderInfra(v);
   if(TAB==='panel') return renderPanel(v);
   renderList(v);
 }
@@ -896,6 +897,56 @@ function setDNS(key,value){ dnsConf()[key] = value; }
 function wgNodes(){
   return [...new Set((ST.inbounds||[]).filter(i=>i.kind==='wireguard' && i.enabled).map(i=>i.node_id))];
 }
+// ---------- инфраструктурная сеть
+
+function infraCfg(){
+  if(!ST.infra) ST.infra = {enabled:false,node_id:'',subnet:'10.89.0.0/24',listen_port:51840,egress:''};
+  return ST.infra;
+}
+function setInfra(k,v){ infraCfg()[k]=v; }
+function addInfraPeer(){
+  if(!ST.infra_peers) ST.infra_peers=[];
+  ST.infra_peers.push({name:'',enabled:true,egress:''});
+  render();
+}
+function delInfraPeer(i){ ST.infra_peers.splice(i,1); render(); }
+function setInfraPeer(i,k,v){ ST.infra_peers[i][k]=v; }
+
+function infraEgressOpts(cur){
+  const opts=[['','как у сети'],['direct','direct — NAT хаба']];
+  (ST.tunnels||[]).filter(t=>t.enabled).forEach(t=>opts.push(['tun:'+t.name,'tun:'+t.name]));
+  return opts.map(([v,l])=>`<option value="${esc(v)}"${v===(cur||'')?' selected':''}>${esc(l)}</option>`).join('');
+}
+
+function renderInfra(v){
+  const ic = infraCfg();
+  const nodes = (ST.nodes||[]).map(n=>`<option value="${esc(n.id)}"${n.id===ic.node_id?' selected':''}>${esc(n.name||n.id)}</option>`).join('');
+  const peers = ST.infra_peers||[];
+  v.innerHTML = `
+    <div class="card"><div class="body">
+      <div class="row">
+        <label><input type="checkbox" ${ic.enabled?'checked':''} onchange="setInfra('enabled',this.checked);render()"> включена</label>
+        <label>узел: <select onchange="setInfra('node_id',this.value)"><option value="">—</option>${nodes}</select></label>
+        <label>подсеть: <input value="${esc(ic.subnet||'')}" oninput="setInfra('subnet',this.value)" style="width:130px"></label>
+        <label>порт: <input type="number" value="${ic.listen_port||51840}" oninput="setInfra('listen_port',+this.value)" style="width:80px"></label>
+        <label>выход: <select onchange="setInfra('egress',this.value)">${infraEgressOpts(ic.egress)}</select></label>
+      </div>
+      <div class="mut">Отдельный системный интерфейс wg-infra. Пиры видят друг друга (ICMP/TCP/UDP), выходят в интернет через общий выход, а VPN-клиенты получают доступ к этой сети по IP — без изменения подписок.</div>
+    </div></div>
+    <div class="row"><button class="b" onclick="addInfraPeer()">+ пир</button>
+      <span class="mut">Ключи и адрес выдаются при сохранении. Новый пир не требует обновления подписок и применяется без перезапуска интерфейса.</span></div>
+    ${peers.length?`<table class="tbl"><thead><tr><th>имя</th><th>адрес</th><th>вкл</th><th>личный выход</th><th></th></tr></thead><tbody>
+      ${peers.map((p,i)=>`<tr>
+        <td><input value="${esc(p.name||'')}" oninput="setInfraPeer(${i},'name',this.value)" placeholder="srv-db"></td>
+        <td class="mut">${esc(p.address||'выдастся при сохранении')}</td>
+        <td><input type="checkbox" ${p.enabled!==false?'checked':''} onchange="setInfraPeer(${i},'enabled',this.checked)"></td>
+        <td><select onchange="setInfraPeer(${i},'egress',this.value)">${infraEgressOpts(p.egress)}</select></td>
+        <td><a class="b" href="/api/infra/${encodeURIComponent(p.id||p.name||'')}/wg-conf">wg</a>
+            <button class="b" onclick="delInfraPeer(${i})">×</button></td>
+      </tr>`).join('')}
+    </tbody></table>`:'<div class="mut">пиров пока нет</div>'}`;
+}
+
 function renderDNS(v){
   const d = dnsConf();
   const nodes = wgNodes();
