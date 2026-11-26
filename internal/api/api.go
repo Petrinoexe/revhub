@@ -495,6 +495,22 @@ func (s *Server) subscription(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		links := sub.Links(st, c)
+		if r.URL.Query().Get("format") == "singbox" {
+			// Throne/sing-box: готовый конфиг с DNS-правилами зоны, а не ссылки
+			cfg, ok, err := sub.SingBoxJSON(st, c)
+			if err != nil {
+				writeErr(w, http.StatusUnprocessableEntity, err.Error())
+				return
+			}
+			if !ok {
+				writeErr(w, http.StatusNotFound, "у клиента нет включённого WireGuard-инбаунда")
+				return
+			}
+			w.Header().Set("Content-Type", "application/json; charset=utf-8")
+			w.Header().Set("Profile-Title", c.Email)
+			_, _ = w.Write(cfg)
+			return
+		}
 		body := sub.Payload(links)
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		w.Header().Set("Profile-Title", c.Email)
