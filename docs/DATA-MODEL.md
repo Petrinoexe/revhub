@@ -58,8 +58,7 @@
 | `enabled` | выключенный не попадает ни в конфиг, ни в подписку |
 | `expires_at`, `quota_gb` | срок и квота; `0`/пусто = без ограничения |
 | `inbounds` | список inbound-id, к которым привязан (аналог client_inbounds) |
-| `wireguard` | карта `inbound-id → {address, private_key, public_key, preshared_key}`; заполняется при сохранении, уходит в подписку и в клиентский `.conf` |
-| `hostname` | метка имени в зоне DNS (`alice` → `alice.vpn.internal`); пустая выводится из email, повторы получают `-2` |
+| `wireguard` | карта `inbound-id → {address, private_key, public_key, preshared_key}`; заполняется при сохранении и уходит в подписку |
 | `sub_token` | секрет URL подписки |
 
 ## DNS — зона инфраструктуры

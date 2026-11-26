@@ -128,7 +128,6 @@ const SCHEMA = {
     {k:'id', l:'id'}, {k:'email', l:'Email (метка)'}, {k:'enabled', l:'вкл', bool:true},
     {k:'expires_at', l:'Истекает (RFC3339)'}, {k:'quota_gb', l:'Квота, ГБ', num:true},
     {k:'uuid', l:'UUID', wide:true}, {k:'flow', l:'Flow', sel:['','none','xtls-rprx-vision'], labels:{'':'Как в инбаунде',none:'Без Flow','xtls-rprx-vision':'Vision'}}, {k:'sub_token', l:'sub_token', wide:true},
-    {k:'hostname', l:'Имя в DNS (метка зоны)', wide:true},
     {k:'inbounds', l:'Инбаунды клиента', multi:'inbounds', wide:true}
   ],
   routes: [
@@ -158,7 +157,6 @@ const GROUPS = {
                       'public_key','private_key','listen_port_in']]],
   clients: [['Основное',['id','email','enabled','expires_at','quota_gb']],
             ['Ключи',['uuid','flow','sub_token']],
-            ['Имя в сети',['hostname']],
             ['Доступ',['inbounds']]],
   routes: [['Условия',['user','inbound','domain','ip','port','network']],
            ['Куда и где',['node_id','outbound','enabled']]]
@@ -861,9 +859,6 @@ function dnsConf(){
   return ST.dns;
 }
 function setDNS(key,value){ dnsConf()[key] = value; }
-function wgNodes(){
-  return [...new Set((ST.inbounds||[]).filter(i=>i.kind==='wireguard' && i.enabled).map(i=>i.node_id))];
-}
 // ---------- инфраструктурная сеть
 
 function infraCfg(){
@@ -916,27 +911,31 @@ function renderInfra(v){
 
 function renderDNS(v){
   const d = dnsConf();
-  const nodes = wgNodes();
-  if(!d.node_id) d.node_id = nodes[0] || LOCAL_NODE;
+  const ic = ST.infra || {};
+  const node = ic.node_id || '';
+  d.node_id = node;
+  const disabledHint = !ic.enabled || !node
+    ? '<div class="hint" style="color:var(--danger)">Сначала включи сеть инфраструктуры и укажи её узел: DNS живёт только на wg-infra.</div>'
+    : '';
   v.innerHTML = `
   <div class="card"><div class="body">
-    <div class="hint">Корневой домен делает панель авторитетным DNS для клиентской сети: каждый клиент с WireGuard получает имя
-      <b>имя.зона</b>, панель — имя <b>панель.зона</b>. Резолвит dnsmasq на узле, панель только рендерит его конфиг и файл зоны.
-      Клиентам адрес резолвера уходит в их конфиг автоматически (поле «DNS клиентам» в инбаунде, если зона выключена).</div>
+    <div class="hint">Корневой домен включает авторитетную зону инфраструктуры: имена инфра-пиров
+      (<b>имя.зона</b>) и панели (<b>панель.зона</b>) отдаёт dnsmasq на <b>wg-infra</b>.
+      Клиентские DNS-запросы приходят туда через Xray; ответы из подсети инфры идут в неё,
+      остальные имена резолвятся публичными DNS через выбранный выходной туннель.</div>
+    ${disabledHint}
     <div class="grid">
-      <div class="f"><label>Корневой домен (зона)</label><input value="${esc(d.root)}" placeholder="vpn.internal" onchange="setDNS('root',this.value.trim().toLowerCase())"></div>
-      <div class="f"><label>Узел с DNS</label><select onchange="setDNS('node_id',this.value)">
-        ${nodes.length? nodes.map(id=>`<option value="${esc(id)}" ${id===d.node_id?'selected':''}>${esc(nodeLabel(id))}</option>`).join('') : '<option value="">нет включённых WireGuard-инбаундов</option>'}
-      </select></div>
+      <div class="f"><label>Корневой домен (зона)</label><input value="${esc(d.root)}" placeholder="infra.cringe" onchange="setDNS('root',this.value.trim().toLowerCase())"></div>
+      <div class="f"><label>Узел DNS</label><input value="${esc(node ? nodeLabel(node) : '—')}" disabled></div>
       <div class="f"><label>Имя панели в зоне</label><input value="${esc(d.panel)}" onchange="setDNS('panel',this.value.trim().toLowerCase())"></div>
       <div class="f"><label>Порт DNS</label><input type="number" value="${esc(d.port)}" onchange="setDNS('port',Number(this.value)||0)"></div>
       <div class="f"><label>TTL, сек</label><input type="number" value="${esc(d.ttl)}" onchange="setDNS('ttl',Number(this.value)||0)"></div>
-      <div class="f wide"><label>Upstream (IP или IP:порт, по строке; пусто — резолверы узла из /etc/resolv.conf)</label>
+      <div class="f wide"><label>Upstream (IP или IP:порт, по строке; пусто — 1.1.1.1 и 1.0.0.1 через туннель)</label>
         <textarea onchange="setDNS('upstream',this.value.split(/[\\n,]+/).map(s=>s.trim()).filter(Boolean))">${esc((d.upstream||[]).join('\n'))}</textarea></div>
     </div>
     <div class="row">
       <button class="b p" onclick="save()">Сохранить и применить</button>
-      <input id="dnsq" placeholder="alice.vpn.internal" style="width:220px" onkeydown="if(event.key==='Enter')dnsCheck()">
+      <input id="dnsq" placeholder="srv-db.infra.cringe" style="width:240px" onkeydown="if(event.key==='Enter')dnsCheck()">
       <button class="b" onclick="dnsCheck()">Что ответит</button>
     </div>
     <div id="dns-answer" class="hint"></div>
@@ -982,7 +981,10 @@ function renderPanel(v){
   const addrs = [...new Set((ST.inbounds||[])
     .filter(i=>i.kind==='wireguard' && i.enabled && i.node_id===LOCAL_NODE && i.wireguard && i.wireguard.subnet)
     .map(i=>{ const m=/(\d+\.\d+\.\d+)\.\d+\/(\d+)/.exec(i.wireguard.subnet); return m? m[1]+'.1':''; })
-    .filter(Boolean))];
+    .filter(Boolean).concat(
+      ST.infra && ST.infra.enabled && ST.infra.node_id===LOCAL_NODE
+        ? [(String(ST.infra.subnet||'').replace(/\.\d+\/\d+$/, '.1'))].filter(a=>a && !a.startsWith('.'))
+        : []))];
   const port = (String(p.listen).split(':').pop()||'2096');
   v.innerHTML = `
   <div class="card"><div class="body">

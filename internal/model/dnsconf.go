@@ -129,29 +129,6 @@ func (s State) WireGuardAddrs(nodeID string) []string {
 	return out
 }
 
-// clientLabel — метка имени клиента в зоне: hostname, иначе начало email.
-func clientLabel(c Client) string {
-	if c.Hostname != "" {
-		return c.Hostname
-	}
-	return hostnameFromEmail(c.Email, c.ID)
-}
-
-// hostnameFromEmail — метка из email: "alice@revhub" → "alice".
-func hostnameFromEmail(email, fallback string) string {
-	local := email
-	if i := strings.IndexByte(local, '@'); i > 0 {
-		local = local[:i]
-	}
-	if label := SlugLabel(local); label != "" {
-		return label
-	}
-	if label := SlugLabel(fallback); label != "" {
-		return label
-	}
-	return "client"
-}
-
 // NormalizeName приводит имя DNS к сравнимому виду: нижний регистр, без точки.
 func NormalizeName(name string) string {
 	return strings.ToLower(strings.TrimSuffix(strings.TrimSpace(name), "."))
@@ -177,29 +154,6 @@ func SlugLabel(s string) string {
 	return strings.Trim(b.String(), "-")
 }
 
-// normalizeDNSHostnames проставляет метки клиентам и разводит совпадения
-// суффиксом -2, -3: два клиента с email alice@a и alice@b не должны делить имя.
-func (s *State) normalizeDNSHostnames() {
-	used := map[string]bool{}
-	for i := range s.Clients {
-		c := &s.Clients[i]
-		label := SlugLabel(c.Hostname)
-		if label == "" {
-			label = hostnameFromEmail(c.Email, c.ID)
-		}
-		base := label
-		for n := 2; used[label]; n++ {
-			suffix := "-" + strconv.Itoa(n)
-			if len(base)+len(suffix) > 63 {
-				base = base[:63-len(suffix)]
-			}
-			label = strings.Trim(base+suffix, "-")
-		}
-		c.Hostname = label
-		used[label] = true
-	}
-}
-
 func (s *State) normalizeDNS() {
 	if s.Panel == nil {
 		s.Panel = &PanelConfig{}
@@ -222,11 +176,9 @@ func (s *State) normalizeDNS() {
 	if s.DNS.Panel == "" {
 		s.DNS.Panel = DefaultDNSPanel
 	}
-	if s.DNS.NodeID == "" {
-		// DNS обслуживает инфраструктурную сеть: живёт на узле wg-infra.
-		if s.Infra != nil && s.Infra.Enabled && s.Infra.NodeID != "" {
-			s.DNS.NodeID = s.Infra.NodeID
-		}
+	if s.Infra != nil && s.Infra.Enabled && s.Infra.NodeID != "" {
+		// DNS живёт только на узле wg-infra; выбор узла в UI не нужен.
+		s.DNS.NodeID = s.Infra.NodeID
 	}
 	s.DNS.Root = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(s.DNS.Root)), ".")
 }
@@ -248,6 +200,9 @@ func (s State) validateDNS(add func(string, ...any)) {
 		if s.Infra == nil || !s.Infra.Enabled || s.Infra.NodeID != s.DNS.NodeID {
 			add("DNS: узел %q не обслуживает сеть инфраструктуры (DNS живёт на узле wg-infra)", s.DNS.NodeID)
 		}
+	} else if s.Infra == nil || !s.Infra.Enabled || s.Infra.NodeID == "" {
+		// Иначе зона молча не рендерится: DNSMasq требует включённый wg-infra.
+		add("DNS: зона работает только в сети инфраструктуры — включите wg-infra и укажите её узел")
 	}
 	if s.DNS.TTL < 0 || s.DNS.TTL > 86400 {
 		add("DNS: TTL %d вне 0..86400", s.DNS.TTL)
@@ -256,19 +211,6 @@ func (s State) validateDNS(add func(string, ...any)) {
 		if !validResolver(up) {
 			add("DNS: upstream %q — нужен IP или IP:порт", up)
 		}
-	}
-	names := map[string]string{}
-	for _, c := range s.Clients {
-		label := c.Hostname
-		if !validLabel(label) {
-			add("клиент %s: имя %q — не метка DNS", c.Email, label)
-			continue
-		}
-		if prev, ok := names[label]; ok {
-			add("DNS: имя %q занято дважды (%s и %s)", label, prev, c.Email)
-			continue
-		}
-		names[label] = c.Email
 	}
 }
 

@@ -171,9 +171,7 @@ type Client struct {
 	// Egress — личный выход пира: пусто = как у инбаунда, direct = напрямую,
 	// tun:<имя> = в конкретный туннель. Позволяет маршрутизировать клиентов
 	// по одному в разные выходные узлы.
-	Egress string `json:"egress,omitempty"`
-	// Hostname — метка имени в зоне DNS: alice + зона revhub.internal.
-	Hostname  string                   `json:"hostname,omitempty"`
+	Egress    string                   `json:"egress,omitempty"`
 	WireGuard map[string]WireGuardPeer `json:"wireguard,omitempty"` // по ID инбаунда
 }
 
@@ -511,7 +509,6 @@ func (s *State) Normalize() {
 	}
 	s.assignWireGuardPorts()
 	s.normalizeWireGuardPeers()
-	s.normalizeDNSHostnames()
 	s.normalizeDNS()
 	s.normalizeInfra()
 }

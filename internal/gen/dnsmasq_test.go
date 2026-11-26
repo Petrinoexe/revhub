@@ -78,6 +78,23 @@ func TestDNSMasqRendersZone(t *testing.T) {
 	}
 }
 
+func TestDNSZoneWithoutClientInbound(t *testing.T) {
+	st := model.Demo()
+	st.Inbounds = nil
+	st.Clients = nil
+	st.Infra = &model.InfraConfig{Enabled: true, NodeID: "hub"}
+	st.InfraPeers = []model.InfraPeer{{Name: "srv-db", Address: "10.89.0.2/32", Enabled: true}}
+	st.DNS = &model.DNSConfig{Root: "infra.cringe", NodeID: "hub"}
+	st.Normalize()
+	files, ok, err := DNSMasq(st, "hub")
+	if err != nil || !ok {
+		t.Fatalf("зона должна создаваться без клиентских инбаундов: ok=%v err=%v", ok, err)
+	}
+	if !strings.Contains(files.Hosts, "srv-db.infra.cringe") {
+		t.Fatalf("записи инфра-пира нет:\n%s", files.Hosts)
+	}
+}
+
 func TestDNSMasqExplicitUpstream(t *testing.T) {
 	st := dnsState()
 	st.DNS.Upstream = []string{"9.9.9.9", "1.1.1.1:5353"}

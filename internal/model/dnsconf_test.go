@@ -28,21 +28,6 @@ func dnsTestState() State {
 	return st
 }
 
-// Две почты с одинаковым началом не должны получить одно имя в зоне.
-func TestHostnamesAreUnique(t *testing.T) {
-	st := dnsTestState()
-	got := []string{}
-	for _, c := range st.Clients {
-		got = append(got, c.Hostname)
-	}
-	if got[0] != "alice" || got[1] != "alice-2" {
-		t.Errorf("имена клиентов = %v, ожидалось alice и alice-2", got)
-	}
-	if got[2] == "" || !validLabel(got[2]) {
-		t.Errorf("имя без латиницы должно замениться на метку, получено %q", got[2])
-	}
-}
-
 func TestDNSRecords(t *testing.T) {
 	st := dnsTestState()
 	recs := DNSRecords(st, "hub")
@@ -62,6 +47,15 @@ func TestDNSRecords(t *testing.T) {
 	}
 	if recs := DNSRecords(st, "exit"); len(recs) != 0 {
 		t.Errorf("на чужом узле записей быть не должно: %+v", recs)
+	}
+}
+
+func TestDNSNodeFollowsInfra(t *testing.T) {
+	st := dnsTestState()
+	st.DNS.NodeID = "old-client-node"
+	st.Normalize()
+	if st.DNS.NodeID != "hub" {
+		t.Fatalf("DNS остался на старом узле %q, ожидался узел wg-infra hub", st.DNS.NodeID)
 	}
 }
 
@@ -88,9 +82,14 @@ func TestDNSValidation(t *testing.T) {
 		t.Error("DNS на узле без wg-infra должен ломать валидацию")
 	}
 	st.DNS.NodeID = "hub"
-	st.Clients[0].Hostname = "Bob"
-	if err := st.Validate(); err == nil || !strings.Contains(err.Error(), "имя") {
-		t.Errorf("имя с заглавными не поймано: %v", err)
+	if err := st.Validate(); err != nil {
+		t.Errorf("валидное состояние отвергнуто: %v", err)
+	}
+	st2 := dnsTestState()
+	st2.Infra = nil
+	st2.DNS.NodeID = ""
+	if err := st2.Validate(); err == nil || !strings.Contains(err.Error(), "инфраструктур") {
+		t.Errorf("DNS без wg-infra должен явно ломать валидацию: %v", err)
 	}
 }
 
