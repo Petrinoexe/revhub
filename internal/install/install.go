@@ -383,6 +383,11 @@ func Repair(o Options, statePath string) (*Report, error) {
 	if !o.DryRun && os.Geteuid() != 0 {
 		return rep, fmt.Errorf("нужен root: правятся юниты, sudoers и конфиг ядра")
 	}
+	if !o.DryRun {
+		if err := os.MkdirAll(rootLibexecDir(o), 0o700); err != nil {
+			return rep, err
+		}
+	}
 
 	nodeID, err := localNodeID(statePath)
 	if err != nil {
