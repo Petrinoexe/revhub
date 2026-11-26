@@ -18,6 +18,10 @@ func dnsTestState() State {
 			{Email: "alice@other.example", Enabled: true, Inbounds: []string{"in-wg"}},
 			{Email: "Иван Петров", Enabled: true, Inbounds: []string{"in-wg"}},
 		},
+		Infra: &InfraConfig{Enabled: true, NodeID: "hub"},
+		InfraPeers: []InfraPeer{
+			{Name: "srv-db", Address: "10.89.0.2/32", Enabled: true},
+		},
 		DNS: &DNSConfig{Root: "vpn.internal"},
 	}
 	st.Normalize()
@@ -46,15 +50,15 @@ func TestDNSRecords(t *testing.T) {
 	for _, r := range recs {
 		byName[r.Name] = r
 	}
-	if panel, ok := byName["panel.vpn.internal"]; !ok || panel.IP != "10.88.0.1" || panel.Kind != "panel" {
+	if panel, ok := byName["panel.vpn.internal"]; !ok || panel.IP != "10.89.0.1" || panel.Kind != "panel" {
 		t.Fatalf("записи панели нет: %+v", recs)
 	}
-	alice, ok := byName["alice.vpn.internal"]
-	if !ok || alice.IP != "10.88.0.2" || alice.Kind != "client" {
-		t.Fatalf("записи клиента нет: %+v", recs)
+	db, ok := byName["srv-db.vpn.internal"]
+	if !ok || db.IP != "10.89.0.2" || db.Kind != "infra" {
+		t.Fatalf("записи инфра-пира нет: %+v", recs)
 	}
-	if _, ok := byName["alice-2.vpn.internal"]; !ok {
-		t.Error("второй alice потерялся")
+	if _, ok := byName["alice.vpn.internal"]; ok {
+		t.Error("клиентский адрес 10.88.x не должен попадать в инфра-зону")
 	}
 	if recs := DNSRecords(st, "exit"); len(recs) != 0 {
 		t.Errorf("на чужом узле записей быть не должно: %+v", recs)
@@ -81,7 +85,7 @@ func TestDNSValidation(t *testing.T) {
 	}
 	st.DNS.NodeID = "exit"
 	if err := st.Validate(); err == nil {
-		t.Error("DNS на узле без WireGuard должен ломать валидацию")
+		t.Error("DNS на узле без wg-infra должен ломать валидацию")
 	}
 	st.DNS.NodeID = "hub"
 	st.Clients[0].Hostname = "Bob"

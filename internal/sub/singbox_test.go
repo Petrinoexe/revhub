@@ -10,6 +10,7 @@ import (
 
 func TestSingBoxJSONRendersThroneConfig(t *testing.T) {
 	st := wgState()
+	st.Infra = &model.InfraConfig{Enabled: true, NodeID: "hub", Subnet: "10.89.0.0/24"}
 	st.DNS = &model.DNSConfig{Root: "vpn.internal", NodeID: "hub"}
 	raw, ok, err := SingBoxJSON(st, st.Clients[0])
 	if err != nil || !ok {
@@ -44,7 +45,7 @@ func TestSingBoxJSONRendersThroneConfig(t *testing.T) {
 	dns := cfg["dns"].(map[string]any)
 	servers := dns["servers"].([]any)
 	infra := servers[0].(map[string]any)
-	if infra["server"] != "10.88.0.1" || infra["detour"] != "wg-out" {
+	if infra["server"] != "10.89.0.1" || infra["detour"] != "wg-out" {
 		t.Errorf("infra DNS = %v", infra)
 	}
 	rules := dns["rules"].([]any)

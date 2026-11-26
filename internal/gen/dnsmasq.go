@@ -16,28 +16,17 @@ type DNSMasqFiles struct {
 	Hosts string // /etc/revhub/dns-hosts
 }
 
-// DNSMasq рендерит конфиг и зону для узла. ok=false — DNS выключен или живёт
-// на другом узле.
+// DNSMasq рендерит конфиг и зону для узла инфраструктуры. ok=false — DNS
+// выключен, живёт на другом узле или инфраструктурная сеть не поднята.
 func DNSMasq(st model.State, nodeID string) (DNSMasqFiles, bool, error) {
 	if st.DNS == nil || !st.DNS.Enabled() || st.DNS.NodeID != nodeID {
 		return DNSMasqFiles{}, false, nil
 	}
-	var listens []string
-	for _, in := range st.Inbounds {
-		// Зона живёт только на ядерном клиентском интерфейсе. Пользовательский
-		// WireGuard теперь userspace в Xray: kernel-адреса 10.88.0.1 в системе
-		// нет, dnsmasq туда не забиндится. DNS — следующий этап (§7 ТЗ).
-		if !in.Enabled || in.NodeID != nodeID || in.Kind != model.InboundWireGuard ||
-			in.WireGuard == nil || !in.WireGuard.Kernel {
-			continue
-		}
-		if addr := in.WireGuard.ServerAddress(); addr != "" {
-			listens = append(listens, addr)
-		}
+	if st.Infra == nil || !st.Infra.Enabled || st.Infra.NodeID != nodeID {
+		return DNSMasqFiles{}, false, nil
 	}
-	if len(listens) == 0 {
-		// Клиентских ядерных интерфейсов нет (userspace WG в Xray): зона DNS
-		// сейчас не поддерживается — это следующий этап, не ошибка применения.
+	listen := st.Infra.ServerAddress()
+	if listen == "" {
 		return DNSMasqFiles{}, false, nil
 	}
 	if !validZone(st.DNS.Root) {
@@ -45,14 +34,11 @@ func DNSMasq(st model.State, nodeID string) (DNSMasqFiles, bool, error) {
 	}
 
 	var b strings.Builder
-	b.WriteString("# revhub: DNS клиентской сети WireGuard — генерируется панелью\n")
-	b.WriteString("# правки на узле перетираются при следующем сохранении\n")
+	b.WriteString("# revhub: DNS сети инфраструктуры (wg-infra) — генерируется панелью\n")
+	b.WriteString("# клиентские DNS-запросы приходят сюда через Xray; правки перетираются\n")
 	fmt.Fprintf(&b, "port=%d\n", st.DNS.Port)
-	// Только адреса WG-интерфейсов: наружу резолвер не торчит, а bind-dynamic
-	// переживает момент, когда интерфейс ещё не поднят.
-	for _, addr := range listens {
-		fmt.Fprintf(&b, "listen-address=%s\n", addr)
-	}
+	// Слушаем только адрес хаба в инфра-сети: наружу резолвер не торчит.
+	fmt.Fprintf(&b, "listen-address=%s\n", listen)
 	b.WriteString("bind-dynamic\n")
 	b.WriteString("# /etc/hosts машины не подмешиваем: зона — это модель панели\n")
 	b.WriteString("no-hosts\n")
@@ -63,35 +49,73 @@ func DNSMasq(st model.State, nodeID string) (DNSMasqFiles, bool, error) {
 	// local= делает зону авторитетной: имена, которых нет в hosts, получают
 	// NXDOMAIN, а не уходят в интернет.
 	fmt.Fprintf(&b, "local=/%s/\n", st.DNS.Root)
-	if len(st.DNS.Upstream) > 0 {
-		// Явные upstream'ы: /etc/resolv.conf узла не читаем, иначе резолвер
-		// может спросить сам себя (системный 127.0.0.53).
-		b.WriteString("no-resolv\n")
-		for _, up := range st.DNS.Upstream {
-			addr, err := model.ResolverAddr(up)
-			if err != nil {
-				return DNSMasqFiles{}, false, err
-			}
-			host, port, err := net.SplitHostPort(addr)
-			if err != nil {
-				return DNSMasqFiles{}, false, err
-			}
-			if port == "53" {
-				fmt.Fprintf(&b, "server=%s\n", host)
-			} else {
-				fmt.Fprintf(&b, "server=%s#%s\n", host, port)
-			}
+	// Всё остальное — публичные резолверы через выбранный туннель. Источник
+	// пакета — адрес конца туннеля, для него в PostUp есть ip rule в таблицу
+	// метки; иначе dnsmasq ушёл бы напрямую с IP хаба.
+	upstreams := st.DNS.Upstream
+	if len(upstreams) == 0 {
+		upstreams = []string{"1.1.1.1", "1.0.0.1"}
+	}
+	source := dnsTunnelSource(st, nodeID)
+	b.WriteString("no-resolv\n")
+	for _, up := range upstreams {
+		addr, err := model.ResolverAddr(up)
+		if err != nil {
+			return DNSMasqFiles{}, false, err
 		}
+		host, port, err := net.SplitHostPort(addr)
+		if err != nil {
+			return DNSMasqFiles{}, false, err
+		}
+		target := host
+		if port != "53" {
+			target = host + "#" + port
+		}
+		if source != "" {
+			target += "@" + source
+		}
+		fmt.Fprintf(&b, "server=%s\n", target)
 	}
 	fmt.Fprintf(&b, "addn-hosts=%s\n", DNSHostsPath)
 
 	var h strings.Builder
-	h.WriteString("# revhub: зона DNS клиентской сети — ip имя полное_имя\n")
+	h.WriteString("# revhub: зона DNS инфраструктуры — ip имя полное_имя\n")
 	for _, rec := range model.DNSRecords(st, nodeID) {
 		short := strings.SplitN(rec.Name, ".", 2)[0]
-		fmt.Fprintf(&h, "%s\t%s\t%s\n", rec.IP, rec.Name, short)
+		fmt.Fprintf(&h, "%s	%s	%s\n", rec.IP, rec.Name, short)
 	}
 	return DNSMasqFiles{Conf: b.String(), Hosts: h.String()}, true, nil
+}
+
+// dnsTunnelSource — адрес конца туннеля, выбранного выходом клиентской сети
+// (inbound.egress), иначе выходом самой инфра-сети. Пусто = выхода в туннель
+// нет, dnsmasq спрашивает публичные DNS напрямую с IP хаба.
+func dnsTunnelSource(st model.State, nodeID string) string {
+	egress := ""
+	tags := st.ValidTags(nodeID)
+	for _, in := range st.Inbounds {
+		if in.Enabled && in.NodeID == nodeID && strings.HasPrefix(in.Egress, model.TagTunnel) && tags[in.Egress] {
+			egress = in.Egress
+			break
+		}
+	}
+	if egress == "" && st.Infra != nil && strings.HasPrefix(st.Infra.Egress, model.TagTunnel) && tags[st.Infra.Egress] {
+		egress = st.Infra.Egress
+	}
+	name := strings.TrimPrefix(egress, model.TagTunnel)
+	if name == "" {
+		return ""
+	}
+	for _, t := range st.Tunnels {
+		if !t.Enabled || t.Name != name || t.FromNode != nodeID {
+			continue
+		}
+		from, _, err := t.Addrs()
+		if err == nil {
+			return from
+		}
+	}
+	return ""
 }
 
 // Пути на узле (их читает dnsmasq и пишет apply.sh).

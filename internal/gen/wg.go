@@ -541,6 +541,9 @@ func WGConfig(st model.State, t model.Tunnel, nodeID string) (string, error) {
 		fmt.Fprintf(&b, "PostUp = ip -4 route replace %s/32 dev %%i\n", toAddr)
 		fmt.Fprintf(&b, "PostDown = ip -4 route del %s/32 dev %%i 2>/dev/null || true\n", toAddr)
 		fmt.Fprintf(&b, "PostUp = ip rule add fwmark %d lookup %d 2>/dev/null || true\n", t.Mark, t.Mark)
+		// Локальные пакеты с адресом конца туннеля (DNS-запросы dnsmasq,
+		// выпускаемые через public upstream) должны уходить в тот же туннель.
+		fmt.Fprintf(&b, "PostUp = ip rule add pref 32761 from %s/32 lookup %d 2>/dev/null || true\n", fromAddr, t.Mark)
 		fmt.Fprintf(&b, "PostUp = ip -4 route replace default dev %%i table %d\n", t.Mark)
 		// Проверка, что таблица действительно получила default: без него
 		// правило по iif на клиентском интерфейсе «промахивается» и трафик
@@ -551,6 +554,7 @@ func WGConfig(st model.State, t model.Tunnel, nodeID string) (string, error) {
 		b.WriteString("PostUp = " + soft("printf '2\\n' > /proc/sys/net/ipv4/conf/%i/rp_filter",
 			"rp_filter не сброшен в loose — часть пакетов может фильтроваться") + "\n")
 		fmt.Fprintf(&b, "PostDown = ip rule del fwmark %d lookup %d 2>/dev/null || true\n", t.Mark, t.Mark)
+		fmt.Fprintf(&b, "PostDown = ip rule del pref 32761 from %s/32 lookup %d 2>/dev/null || true\n", fromAddr, t.Mark)
 		fmt.Fprintf(&b, "PostDown = ip -4 route flush table %d 2>/dev/null || true\n", t.Mark)
 	}
 	if !isFrom {
@@ -1033,7 +1037,7 @@ if ! install -m 644 dnsmasq-revhub.conf /etc/dnsmasq.d/revhub.conf 2>/dev/null; 
 fi
 if ! install -m 644 dns-hosts /etc/revhub/dns-hosts 2>/dev/null; then
   dns_ok=0
-  echo "[revhub] не записался /etc/revhub/dns-hosts — имена клиентов в DNS не обновятся" >&2
+  echo "[revhub] не записался /etc/revhub/dns-hosts — имена инфраструктуры в DNS не обновятся" >&2
 fi
 if [ "$dns_ok" = 0 ]; then
   :

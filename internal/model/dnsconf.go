@@ -57,41 +57,41 @@ type DNSRecord struct {
 	Note string `json:"note,omitempty"`
 }
 
-// DNSRecords собирает зону для узла: имена клиентов, у которых есть пир на
-// WireGuard-инбаунде этого узла, плюс имя самой панели (адрес интерфейса).
-// Имена с других узлов сюда не попадают: из одной подсети они недостижимы.
+// DNSRecords собирает зону для узла инфраструктуры: имя панели на адресе
+// wg-infra и имена инфра-пиров. Клиентские адреса 10.88.x сюда не попадают:
+// зона обслуживает инфраструктуру, а клиенты лишь спрашивают её через Xray.
 func DNSRecords(st State, nodeID string) []DNSRecord {
-	if st.DNS == nil || !st.DNS.Enabled() {
+	if st.DNS == nil || !st.DNS.Enabled() || st.Infra == nil || !st.Infra.Enabled || st.Infra.NodeID != nodeID {
+		return nil
+	}
+	server := st.Infra.ServerAddress()
+	if server == "" {
 		return nil
 	}
 	var out []DNSRecord
 	seen := map[string]bool{}
-	for _, in := range st.Inbounds {
-		if in.NodeID != nodeID || !in.Enabled || in.Kind != InboundWireGuard || in.WireGuard == nil {
+	if panel := st.DNS.FQDN(dnsPanelLabel(*st.DNS)); panel != "" {
+		seen[panel] = true
+		out = append(out, DNSRecord{Name: panel, IP: server, Kind: "panel", Note: st.Infra.Interface})
+	}
+	for _, p := range st.InfraPeers {
+		if !p.Enabled {
 			continue
 		}
-		if panel := st.DNS.FQDN(dnsPanelLabel(*st.DNS)); panel != "" && !seen[panel] {
-			if addr := in.WireGuard.ServerAddress(); addr != "" {
-				seen[panel] = true
-				out = append(out, DNSRecord{Name: panel, IP: addr, Kind: "panel", Note: in.Tag})
-			}
+		label := p.Hostname
+		if label == "" {
+			label = SlugLabel(p.Name)
 		}
-		for _, c := range st.Clients {
-			if !c.Enabled || c.Expired() || !hasString(c.Inbounds, in.ID) {
-				continue
-			}
-			peer, ok := c.WireGuard[in.ID]
-			if !ok {
-				continue
-			}
-			ip := peerIP(peer.Address)
-			name := st.DNS.FQDN(clientLabel(c))
-			if ip == "" || name == "" || seen[name] {
-				continue
-			}
-			seen[name] = true
-			out = append(out, DNSRecord{Name: name, IP: ip, Kind: "client", Note: c.Email})
+		if label == "" {
+			label = SlugLabel(p.ID)
 		}
+		ip := peerIP(p.Address)
+		name := st.DNS.FQDN(label)
+		if ip == "" || name == "" || seen[name] {
+			continue
+		}
+		seen[name] = true
+		out = append(out, DNSRecord{Name: name, IP: ip, Kind: "infra", Note: p.display()})
 	}
 	return out
 }
@@ -103,8 +103,9 @@ func dnsPanelLabel(d DNSConfig) string {
 	return DefaultDNSPanel
 }
 
-// WireGuardAddrs — адреса серверов включённых WG-инбаундов узла: единственные
-// адреса, кроме петли, которые панель может занять, не открываясь наружу.
+// WireGuardAddrs — адреса серверов включённых WG-инбаундов узла и адрес
+// wg-infra: единственные адреса, кроме петли, которые панель может занять,
+// не открываясь наружу.
 func (s State) WireGuardAddrs(nodeID string) []string {
 	var out []string
 	for _, in := range s.Inbounds {
@@ -112,6 +113,16 @@ func (s State) WireGuardAddrs(nodeID string) []string {
 			continue
 		}
 		if addr := in.WireGuard.ServerAddress(); addr != "" {
+			out = append(out, addr)
+		}
+	}
+	if s.Infra != nil && s.Infra.Enabled && s.Infra.NodeID == nodeID {
+		if addr := s.Infra.ServerAddress(); addr != "" {
+			for _, prev := range out {
+				if prev == addr {
+					return out
+				}
+			}
 			out = append(out, addr)
 		}
 	}
@@ -212,12 +223,9 @@ func (s *State) normalizeDNS() {
 		s.DNS.Panel = DefaultDNSPanel
 	}
 	if s.DNS.NodeID == "" {
-		// DNS живёт там, где есть клиентская сеть: первый включённый WG-инбаунд.
-		for _, in := range s.Inbounds {
-			if in.Enabled && in.Kind == InboundWireGuard {
-				s.DNS.NodeID = in.NodeID
-				break
-			}
+		// DNS обслуживает инфраструктурную сеть: живёт на узле wg-infra.
+		if s.Infra != nil && s.Infra.Enabled && s.Infra.NodeID != "" {
+			s.DNS.NodeID = s.Infra.NodeID
 		}
 	}
 	s.DNS.Root = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(s.DNS.Root)), ".")
@@ -237,15 +245,8 @@ func (s State) validateDNS(add func(string, ...any)) {
 		add("DNS: некорректный порт %d", s.DNS.Port)
 	}
 	if s.DNS.NodeID != "" {
-		ok := false
-		for _, in := range s.Inbounds {
-			if in.NodeID == s.DNS.NodeID && in.Enabled && in.Kind == InboundWireGuard {
-				ok = true
-				break
-			}
-		}
-		if !ok {
-			add("DNS: узел %q не отдаёт ни одного включённого WireGuard-инбаунда", s.DNS.NodeID)
+		if s.Infra == nil || !s.Infra.Enabled || s.Infra.NodeID != s.DNS.NodeID {
+			add("DNS: узел %q не обслуживает сеть инфраструктуры (DNS живёт на узле wg-infra)", s.DNS.NodeID)
 		}
 	}
 	if s.DNS.TTL < 0 || s.DNS.TTL > 86400 {
@@ -403,11 +404,8 @@ func (s State) validatePanel(add func(string, ...any)) {
 	}
 
 	onWireGuard := false
-	for _, in := range s.Inbounds {
-		if in.Kind != InboundWireGuard || in.WireGuard == nil || !in.Enabled {
-			continue
-		}
-		if host == in.WireGuard.ServerAddress() {
+	for _, addr := range s.WireGuardAddrs(s.Panel.NodeID) {
+		if host == addr {
 			onWireGuard = true
 			break
 		}

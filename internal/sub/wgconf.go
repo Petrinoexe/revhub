@@ -48,8 +48,9 @@ func WireGuardConfigs(st model.State, c model.Client) []Config {
 
 // wireGuardDNS — один резолвер и для wireguard://, и для скачанного .conf.
 func wireGuardDNS(st model.State, in model.Inbound) string {
-	if st.DNS != nil && st.DNS.Enabled() && st.DNS.NodeID == in.NodeID && in.WireGuard.Kernel {
-		if addr := in.WireGuard.ServerAddress(); addr != "" {
+	if st.DNS != nil && st.DNS.Enabled() && st.DNS.NodeID == in.NodeID &&
+		st.Infra != nil && st.Infra.Enabled && st.Infra.NodeID == in.NodeID {
+		if addr := st.Infra.ServerAddress(); addr != "" {
 			return addr
 		}
 	}

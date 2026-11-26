@@ -7,29 +7,38 @@ import (
 	"revhub/internal/model"
 )
 
-// dnsState — хаб с клиентской сетью WireGuard и включённой зоной DNS.
+// dnsState — хаб с инфраструктурной сетью, пользовательским WG и зоной DNS.
 func dnsState() model.State {
-	st := model.State{
-		Version: model.StateVersion,
-		Nodes: []model.Node{
-			{ID: "hub", Name: "Хаб", PublicAddr: "vpn.example.com:2096"},
-			{ID: "exit", Name: "Выход", PublicAddr: "eu.example.com"},
-		},
-		Inbounds: []model.Inbound{{
-			ID: "in-wg", NodeID: "hub", Tag: "wg", Kind: model.InboundWireGuard,
-			Listen: "0.0.0.0", Port: 51820, Enabled: true,
-		}},
-		Clients: []model.Client{
-			{Email: "alice@revhub", Enabled: true, Inbounds: []string{"in-wg"}},
-			{Email: "bob@revhub", Enabled: true, Inbounds: []string{"in-wg"}},
-			{Email: "carol@revhub", Inbounds: []string{"in-wg"}}, // выключен
-		},
-		DNS: &model.DNSConfig{Root: "vpn.internal"},
+	st := model.Demo()
+	st.Inbounds = append(st.Inbounds, model.Inbound{
+		ID: "in-wg", NodeID: "hub", Tag: "wg", Kind: model.InboundWireGuard,
+		Listen: "0.0.0.0", Port: 51820, Enabled: true, Egress: "tun:eu",
+	})
+	st.Clients[0].Inbounds = append(st.Clients[0].Inbounds, "in-wg")
+	st.Infra = &model.InfraConfig{Enabled: true, NodeID: "hub"}
+	st.InfraPeers = []model.InfraPeer{
+		{Name: "srv-db", Address: "10.89.0.2/32", Enabled: true},
+		{Name: "srv-app", Address: "10.89.0.3/32", Enabled: true},
+		{Name: "off", Address: "10.89.0.4/32"},
 	}
+	st.DNS = &model.DNSConfig{Root: "infra.cringe"}
 	st.Normalize()
-	// Зона DNS существует только при ядерном клиентском интерфейсе.
-	st.Inbounds[0].WireGuard.Kernel = true
 	return st
+}
+
+func dnsSource(t *testing.T, st model.State) string {
+	t.Helper()
+	for _, tun := range st.Tunnels {
+		if tun.Name == "eu" && tun.Enabled {
+			from, _, err := tun.Addrs()
+			if err != nil {
+				t.Fatal(err)
+			}
+			return from
+		}
+	}
+	t.Fatal("туннеля eu нет")
+	return ""
 }
 
 func TestDNSMasqRendersZone(t *testing.T) {
@@ -38,38 +47,34 @@ func TestDNSMasqRendersZone(t *testing.T) {
 	if err != nil || !ok {
 		t.Fatalf("зона не отрендерилась: ok=%v err=%v", ok, err)
 	}
+	src := dnsSource(t, st)
 	for _, want := range []string{
 		"port=53\n",
-		"listen-address=10.88.0.1\n",
+		"listen-address=10.89.0.1\n",
 		"bind-dynamic\n",
 		"no-hosts\n",
-		"domain=vpn.internal\n",
-		"local=/vpn.internal/\n",
+		"domain=infra.cringe\n",
+		"local=/infra.cringe/\n",
+		"no-resolv\n",
+		"server=1.1.1.1@" + src + "\n",
+		"server=1.0.0.1@" + src + "\n",
 		"addn-hosts=/etc/revhub/dns-hosts\n",
 	} {
 		if !strings.Contains(files.Conf, want) {
 			t.Errorf("в конфиге dnsmasq нет %q:\n%s", want, files.Conf)
 		}
 	}
-	if strings.Contains(files.Conf, "no-resolv") {
-		t.Error("без явных upstream'ов dnsmasq должен читать resolv.conf узла")
-	}
-	alice := st.Clients[0]
-	addr := alice.WireGuard["in-wg"].Address
-	if addr == "" {
-		t.Fatal("у клиента нет адреса WireGuard")
-	}
-	ip := strings.TrimSuffix(addr, "/32")
 	for _, want := range []string{
-		ip + "\talice.vpn.internal\talice\n",
-		"10.88.0.1\tpanel.vpn.internal\tpanel\n",
+		"10.89.0.1\tpanel.infra.cringe\tpanel\n",
+		"10.89.0.2\tsrv-db.infra.cringe\tsrv-db\n",
+		"10.89.0.3\tsrv-app.infra.cringe\tsrv-app\n",
 	} {
 		if !strings.Contains(files.Hosts, want) {
 			t.Errorf("в зоне нет %q:\n%s", want, files.Hosts)
 		}
 	}
-	if strings.Contains(files.Hosts, "carol") {
-		t.Error("выключенный клиент попал в зону")
+	if strings.Contains(files.Hosts, "10.88.") || strings.Contains(files.Hosts, "off.") {
+		t.Errorf("в зону попали клиентские адреса или выключенный пир:\n%s", files.Hosts)
 	}
 }
 
@@ -80,7 +85,8 @@ func TestDNSMasqExplicitUpstream(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"no-resolv\n", "server=9.9.9.9\n", "server=1.1.1.1#5353\n"} {
+	src := dnsSource(t, st)
+	for _, want := range []string{"no-resolv\n", "server=9.9.9.9@" + src + "\n", "server=1.1.1.1#5353@" + src + "\n"} {
 		if !strings.Contains(files.Conf, want) {
 			t.Errorf("нет %q:\n%s", want, files.Conf)
 		}
@@ -90,7 +96,7 @@ func TestDNSMasqExplicitUpstream(t *testing.T) {
 func TestDNSMasqOnlyOnItsNode(t *testing.T) {
 	st := dnsState()
 	if _, ok, _ := DNSMasq(st, "exit"); ok {
-		t.Error("на узле без WireGuard-инбаунда зона рендериться не должна")
+		t.Error("на узле без wg-infra зона рендериться не должна")
 	}
 	st.DNS.Root = ""
 	if _, ok, _ := DNSMasq(st, "hub"); ok {

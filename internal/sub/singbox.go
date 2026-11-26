@@ -46,8 +46,9 @@ func SingBoxJSON(st model.State, c model.Client) ([]byte, bool, error) {
 
 	dnsServers := []map[string]any{}
 	var dnsRules []map[string]any
-	if st.DNS != nil && st.DNS.Enabled() && st.DNS.NodeID == in.NodeID {
-		if addr := in.WireGuard.ServerAddress(); addr != "" {
+	if st.DNS != nil && st.DNS.Enabled() && st.DNS.NodeID == in.NodeID &&
+		st.Infra != nil && st.Infra.Enabled && st.Infra.NodeID == in.NodeID {
+		if addr := st.Infra.ServerAddress(); addr != "" {
 			dnsServers = append(dnsServers, map[string]any{
 				"tag": "infra", "type": "udp", "server": addr, "detour": "wg-out",
 			})
