@@ -56,6 +56,7 @@ func wireGuardLink(in model.Inbound, endpoint string, c model.Client, peer model
 	q := url.Values{
 		"publickey": {in.WireGuard.PublicKey}, "presharedkey": {peer.PresharedKey},
 		"address": {peer.Address}, "mtu": {strconv.Itoa(model.DefaultWireGuardMTU)},
+		"keepalive": {"25"},
 	}
 	// DNS совпадает с wg-quick конфигом, включая внутреннюю зону dnsmasq.
 	if strings.TrimSpace(dns) != "" {

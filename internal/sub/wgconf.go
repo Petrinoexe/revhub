@@ -48,12 +48,17 @@ func WireGuardConfigs(st model.State, c model.Client) []Config {
 
 // wireGuardDNS — один резолвер и для wireguard://, и для скачанного .conf.
 func wireGuardDNS(st model.State, in model.Inbound) string {
-	if st.DNS != nil && st.DNS.Enabled() && st.DNS.NodeID == in.NodeID {
+	if st.DNS != nil && st.DNS.Enabled() && st.DNS.NodeID == in.NodeID && in.WireGuard.Kernel {
 		if addr := in.WireGuard.ServerAddress(); addr != "" {
 			return addr
 		}
 	}
-	return in.WireGuard.DNS
+	// DNS зоны пока нет: отдаём один внешний резолвер. Список через запятую
+	// часть клиентов парсит как одно (невалидное) имя.
+	if i := strings.IndexByte(in.WireGuard.DNS, ','); i >= 0 {
+		return strings.TrimSpace(in.WireGuard.DNS[:i])
+	}
+	return strings.TrimSpace(in.WireGuard.DNS)
 }
 
 // wgConfigText — стандартный формат wg-quick: клиент дозванивается до узла,

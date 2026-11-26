@@ -26,7 +26,14 @@ func XrayConfig(st model.State, nodeID string) (map[string]any, error) {
 			continue
 		}
 		if in.Kind == model.InboundWireGuard {
-			continue // ядерный интерфейс, не инбаунд xray
+			// Пользовательский WireGuard — userspace-inbound Xray (как в 3x-ui):
+			// TCP/UDP идут через routing, ядерного интерфейса нет.
+			ib, err := buildWireGuardInbound(st, in)
+			if err != nil {
+				return nil, fmt.Errorf("инбаунд %s: %w", in.Tag, err)
+			}
+			inbounds = append(inbounds, ib)
+			continue
 		}
 		ib, err := buildInbound(st, in)
 		if err != nil {
@@ -170,10 +177,21 @@ func buildInbound(st model.State, in model.Inbound) (map[string]any, error) {
 	}, nil
 }
 
+// buildWireGuardInbound — пользовательский WireGuard внутри Xray-core
+// (userspace). Формат повторяет 3x-ui и документацию Xray: в settings только
+// secretKey, peers и mtu. Поля address у inbound нет — адреса клиентов задаются
+// их allowedIPs, а стек Xray сам превращает пакеты в TCP/UDP-потоки, которые
+// идут через routing (infra-outbound, tun-метки, direct).
 func buildWireGuardInbound(st model.State, in model.Inbound) (map[string]any, error) {
 	wg := in.WireGuard
-	if wg == nil || wg.PrivateKey == "" || wg.ServerAddress() == "" {
-		return nil, fmt.Errorf("нет настроек WireGuard")
+	if wg == nil || wg.PrivateKey == "" || wg.PublicKey == "" {
+		return nil, fmt.Errorf("нет ключей WireGuard")
+	}
+	if pub := wgPublicKeyOf(wg.PrivateKey); pub == "" || pub != wg.PublicKey {
+		return nil, fmt.Errorf("неверная пара ключей WireGuard")
+	}
+	if in.Port <= 0 || in.Port > 65535 {
+		return nil, fmt.Errorf("некорректный порт %d", in.Port)
 	}
 	peers := []any{}
 	for _, c := range st.Clients {
@@ -181,20 +199,34 @@ func buildWireGuardInbound(st model.State, in model.Inbound) (map[string]any, er
 			continue
 		}
 		peer, ok := c.WireGuard[in.ID]
-		if !ok {
+		if !ok || peer.Address == "" || peer.PublicKey == "" {
 			return nil, fmt.Errorf("у клиента %s нет ключей WireGuard", c.Email)
 		}
-		peers = append(peers, map[string]any{
-			"email": c.Email, "publicKey": peer.PublicKey, "preSharedKey": peer.PresharedKey,
+		if _, ok := modelPeerPrefix(peer.Address); !ok {
+			return nil, fmt.Errorf("у клиента %s некорректный адрес WireGuard", c.Email)
+		}
+		p := map[string]any{
+			"publicKey":  peer.PublicKey,
 			"allowedIPs": []string{peer.Address},
-		})
+			"email":      c.Email,
+			"level":      0,
+		}
+		if peer.PresharedKey != "" {
+			p["preSharedKey"] = peer.PresharedKey
+		}
+		peers = append(peers, p)
+	}
+	settings := map[string]any{
+		"secretKey": wg.PrivateKey,
+		"peers":     peers,
+		"mtu":       model.DefaultWireGuardMTU,
 	}
 	return map[string]any{
-		"tag": in.Tag, "listen": in.Listen, "port": in.Port, "protocol": "wireguard",
-		"settings": map[string]any{
-			"secretKey": wg.PrivateKey, "address": []string{wg.ServerAddress()},
-			"mtu": model.DefaultWireGuardMTU, "peers": peers,
-		},
+		"tag":      in.Tag,
+		"listen":   in.Listen,
+		"port":     in.Port,
+		"protocol": "wireguard",
+		"settings": settings,
 	}, nil
 }
 
@@ -386,6 +418,28 @@ func buildRules(st model.State, nodeID string) ([]any, error) {
 		rules = append(rules, map[string]any{
 			"type": "field", "ip": []string{subnet}, "outboundTag": model.TagInfra,
 		})
+	}
+	// Личные выходы клиентов: у WireGuard-пира нет xray-пользователя, поэтому
+	// правило матчит адрес источника (allowedIPs пира). Стоит выше общих правил,
+	// но ниже infra: инфра-подсеть всегда имеет приоритет (§5 ТЗ).
+	if tags := st.ValidTags(nodeID); len(tags) > 0 {
+		for _, c := range st.Clients {
+			if !c.Enabled || c.Expired() || c.Egress == "" || !tags[c.Egress] {
+				continue
+			}
+			for _, in := range st.Inbounds {
+				if in.NodeID != nodeID || !in.Enabled || in.Kind != model.InboundWireGuard {
+					continue
+				}
+				peer, ok := c.WireGuard[in.ID]
+				if !ok || peer.Address == "" {
+					continue
+				}
+				rules = append(rules, map[string]any{
+					"type": "field", "source": []string{peer.Address}, "outboundTag": c.Egress,
+				})
+			}
+		}
 	}
 	catchAll := false
 	for _, r := range st.Routes {

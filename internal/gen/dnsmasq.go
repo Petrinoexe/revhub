@@ -24,7 +24,11 @@ func DNSMasq(st model.State, nodeID string) (DNSMasqFiles, bool, error) {
 	}
 	var listens []string
 	for _, in := range st.Inbounds {
-		if !in.Enabled || in.NodeID != nodeID || in.Kind != model.InboundWireGuard || in.WireGuard == nil {
+		// Зона живёт только на ядерном клиентском интерфейсе. Пользовательский
+		// WireGuard теперь userspace в Xray: kernel-адреса 10.88.0.1 в системе
+		// нет, dnsmasq туда не забиндится. DNS — следующий этап (§7 ТЗ).
+		if !in.Enabled || in.NodeID != nodeID || in.Kind != model.InboundWireGuard ||
+			in.WireGuard == nil || !in.WireGuard.Kernel {
 			continue
 		}
 		if addr := in.WireGuard.ServerAddress(); addr != "" {
@@ -32,7 +36,9 @@ func DNSMasq(st model.State, nodeID string) (DNSMasqFiles, bool, error) {
 		}
 	}
 	if len(listens) == 0 {
-		return DNSMasqFiles{}, false, fmt.Errorf("DNS: у узла %s нет включённого WireGuard-инбаунда", nodeID)
+		// Клиентских ядерных интерфейсов нет (userspace WG в Xray): зона DNS
+		// сейчас не поддерживается — это следующий этап, не ошибка применения.
+		return DNSMasqFiles{}, false, nil
 	}
 	if !validZone(st.DNS.Root) {
 		return DNSMasqFiles{}, false, fmt.Errorf("DNS: зона %q не похожа на домен", st.DNS.Root)

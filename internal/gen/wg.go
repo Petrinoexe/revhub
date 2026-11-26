@@ -62,18 +62,9 @@ func Artifacts(st model.State, nodeID string) ([]File, error) {
 	}
 
 	var wgNames []string
-	for _, in := range st.Inbounds {
-		if !in.Enabled || in.NodeID != nodeID || in.Kind != model.InboundWireGuard {
-			continue
-		}
-		conf, err := ClientWGConf(st, in, nodeID)
-		if err != nil {
-			return nil, fmt.Errorf("инбаунд %s: %w", in.Tag, err)
-		}
-		name := in.WGInterface() + ".conf"
-		files = append(files, File{Name: name, Content: conf, Mode: 0o600})
-		wgNames = append(wgNames, name)
-	}
+	// Клиентские WireGuard-инбаунды рендерятся в xray.json (userspace-inbound).
+	// Ядерные wg-quick конфиги остаются только у транспортных туннелей и
+	// инфраструктурной сети.
 	for _, t := range st.Tunnels {
 		if !t.Enabled || !t.Touches(nodeID) {
 			continue
@@ -203,8 +194,8 @@ func NodePorts(st model.State, nodeID string) []string {
 // NeedsXray identifies nodes with listeners or an Xray tunnel endpoint.
 func NeedsXray(st model.State, nodeID string) bool {
 	for _, in := range st.Inbounds {
-		// Клиентский WireGuard — ядерный интерфейс: xray на таком узле не нужен.
-		if in.Enabled && in.NodeID == nodeID && in.Kind != model.InboundWireGuard {
+		// Любой клиентский инбаунд, включая WireGuard (userspace Xray), требует ядра.
+		if in.Enabled && in.NodeID == nodeID {
 			return true
 		}
 	}
@@ -797,6 +788,16 @@ func applyScript(wgFiles []string, useXray bool, ports []string, forward bool, k
 	b.WriteString("#!/usr/bin/env bash\n")
 	b.WriteString("# Сгенерировано revhub. Порядок важен: сначала туннели, потом ядро.\n")
 	b.WriteString("set -euo pipefail\ncd \"$(dirname \"$0\")\"\n")
+	// Миграция с ядерного клиентского WG на userspace Xray: старый wgc-*
+	// держит UDP-порт, который теперь должен занять xray. Снимаем его ДО
+	// запуска ядра, иначе xray не забиндится и применение упадёт.
+	b.WriteString(`for iface in $(ls /sys/class/net 2>/dev/null | grep '^wgc-' || true); do
+  if [ -d /run/systemd/system ]; then systemctl disable --now "wg-quick@$iface.service" >/dev/null 2>&1 || true; fi
+  wg-quick down "$iface" >/dev/null 2>&1 || true
+  ip link show dev "$iface" >/dev/null 2>&1 && ip link delete dev "$iface" >/dev/null 2>&1 || true
+  echo "[revhub] ядерный клиентский интерфейс $iface снят: WireGuard теперь в Xray"
+done
+`)
 	if len(ports) > 0 {
 		// ufw по умолчанию есть на Ubuntu/Debian; firewalld трогаем, только если он
 		// действительно управляет этой машиной. Ошибки не валят применение.

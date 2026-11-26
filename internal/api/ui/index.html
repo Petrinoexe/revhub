@@ -517,8 +517,7 @@ function actions(tab,i,r){
     <button class="b" title="проверить пинг по туннелю" onclick="${stop}tunnelPing(${i})">📶</button>`;
   if(tab==='clients') b += `<button class="b" title="UUID" onclick="${stop}genUUID(${i})">🆔</button>
     <button class="b" title="токен подписки" onclick="${stop}genToken(${i})">🎫</button>
-    <button class="b" title="ссылки подписки" onclick="${stop}subLinks(${i})">sub</button>
-    <button class="b" title="скачать WireGuard-конфиг (.conf)" onclick="${stop}wgConfig(${i})">wg</button>`;
+    <button class="b" title="ссылки подписки" onclick="${stop}subLinks(${i})">sub</button>`;
   if(tab==='nodes'){
     b += `<button class="b" title="проверить сейчас" onclick="${stop}checkNodes()">🔍</button>`;
     b += `<button class="b" title="применить конфиг на узле" onclick="${stop}applyNode(${i})">⚙</button>
@@ -855,38 +854,6 @@ async function subLinks(i){
   }catch(e){ toast(e.message, true); }
 }
 
-function wgURL(i,inbound){
-  return '/api/wg-conf/'+encodeURIComponent(inbound)+'?client='+encodeURIComponent(ST.clients[i].id);
-}
-function download(url){
-  const a = document.createElement('a');
-  a.href = url; a.download = ''; a.rel = 'noopener';
-  document.body.appendChild(a); a.click(); a.remove();
-}
-async function wgConfig(i){
-  try{
-    const j = await api('/api/wg-conf?client='+encodeURIComponent(ST.clients[i].id));
-    const confs = j.configs || [];
-    if(!confs.length){
-      toast('Нечего скачивать: клиент выключен или истёк, либо у него нет включённого WireGuard-инбаунда с адресом узла.', true);
-      return;
-    }
-    if(confs.length===1){ download(wgURL(i, confs[0].inbound)); return; }
-    const dialog = document.createElement('dialog');
-    dialog.innerHTML = `<form method="dialog">
-      <div class="hint">Приватные ключи клиента: по конфигу на каждый WireGuard-инбаунд. Файл кладётся в /etc/wireguard и поднимается через wg-quick up.</div>
-      <div class="f"><label for="wg-pick">Инбаунд</label><select id="wg-pick">${confs.map(c=>`<option value="${esc(c.inbound)}">${esc(c.tag||c.inbound)} — ${esc(c.file)}</option>`).join('')}</select></div>
-      <div class="f"><label>Содержимое файла</label><pre id="wg-text"></pre></div>
-      <div class="row"><button class="b p" type="button" onclick="download(wgURL(${i}, document.getElementById('wg-pick').value))">⤓ Скачать</button>
-        <button class="b">Закрыть</button></div></form>`;
-    const pick = dialog.querySelector('#wg-pick'), view = dialog.querySelector('#wg-text');
-    const show = ()=>{ const c = confs.find(x=>x.inbound===pick.value) || confs[0]; view.textContent = c ? c.text : ''; };
-    pick.addEventListener('change', show); show();
-    dialog.addEventListener('close',()=>dialog.remove(),{once:true});
-    document.body.appendChild(dialog);
-    dialog.showModal();
-  }catch(e){ toast(e.message, true); }
-}
 // ---------- DNS клиентской сети: зона рендерится в dnsmasq
 
 function dnsConf(){

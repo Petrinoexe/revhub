@@ -26,6 +26,11 @@ type WireGuardInbound struct {
 	DNS        string `json:"dns"` // список IP через запятую для клиентских конфигов
 	PrivateKey string `json:"private_key"`
 	PublicKey  string `json:"public_key"`
+
+	// Kernel=true — ядерный wg-quick интерфейс (старый режим, нужен для DNS-зоны).
+	// Пользовательский WireGuard теперь работает в Xray-core (userspace):
+	// TCP/UDP через маршрутизатор Xray, интерфейса в ядре нет.
+	Kernel bool `json:"kernel,omitempty"`
 }
 
 type WireGuardPeer struct {

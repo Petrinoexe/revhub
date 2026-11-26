@@ -27,6 +27,8 @@ func dnsState() model.State {
 		DNS: &model.DNSConfig{Root: "vpn.internal"},
 	}
 	st.Normalize()
+	// Зона DNS существует только при ядерном клиентском интерфейсе.
+	st.Inbounds[0].WireGuard.Kernel = true
 	return st
 }
 

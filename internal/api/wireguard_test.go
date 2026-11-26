@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -114,50 +113,23 @@ func TestWireGuardClientSubscription(t *testing.T) {
 	if wg.User.Username() != peer.PrivateKey || wg.Query().Get("presharedkey") != peer.PresharedKey || wg.Query().Get("publickey") != st.Inbounds[1].WireGuard.PublicKey {
 		t.Fatal("subscription does not match the saved credentials")
 	}
-	// Клиентский WireGuard — ядерный интерфейс: в конфиге xray его нет,
-	// вместо этого рендерится wg-quick конфиг узла.
+	// Клиентский WireGuard теперь userspace-inbound Xray: в превью обязан быть
+	// protocol=wireguard с публичным ключом клиента, но никогда — приватным.
 	preview := request(http.MethodGet, "/api/preview?node=hub", nil)
-	if bytes.Contains(preview.Body.Bytes(), []byte(`"protocol": "wireguard"`)) ||
-		bytes.Contains(preview.Body.Bytes(), []byte(peer.PrivateKey)) ||
-		bytes.Contains(preview.Body.Bytes(), []byte(peer.PublicKey)) {
-		t.Fatal("WireGuard clients must not be rendered into xray.json")
+	if !bytes.Contains(preview.Body.Bytes(), []byte(`"protocol": "wireguard"`)) ||
+		!bytes.Contains(preview.Body.Bytes(), []byte(peer.PublicKey)) {
+		t.Fatal("WireGuard inbound must be rendered into xray.json")
 	}
-	rendered := request(http.MethodPost, "/api/render", []byte(`{"node":"hub"}`))
-	var files struct {
-		Files []struct {
-			Name string `json:"name"`
-		} `json:"files"`
-	}
-	if err := json.Unmarshal(rendered.Body.Bytes(), &files); err != nil {
-		t.Fatalf("render: %v: %s", err, rendered.Body.String())
-	}
-	confPath := ""
-	for _, f := range files.Files {
-		if strings.HasSuffix(f.Name, ".conf") {
-			confPath = filepath.Join(outDir, "hub", f.Name)
-		}
-	}
-	if confPath == "" {
-		t.Fatalf("wg-quick конфиг клиентов не отрендерился: %s", rendered.Body.String())
-	}
-	conf, err := os.ReadFile(confPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, want := range []string{"ListenPort = 51820", "AllowedIPs = " + peer.Address, peer.PublicKey} {
-		if !bytes.Contains(conf, []byte(want)) {
-			t.Errorf("в конфиге интерфейса нет %q:\n%s", want, conf)
-		}
-	}
-	if bytes.Contains(conf, []byte(peer.PrivateKey)) {
-		t.Error("приватный ключ клиента не должен попадать в конфиг узла")
+	if bytes.Contains(preview.Body.Bytes(), []byte(peer.PrivateKey)) {
+		t.Fatal("private key must not appear in server config")
 	}
 	for _, inactive := range st.Clients[1:] {
 		other := inactive.WireGuard["in-wg"]
 		if other.Address == "" || other.Address == peer.Address || other.PublicKey == peer.PublicKey {
 			t.Fatal("clients must have separate WireGuard credentials and addresses")
 		}
-		if bytes.Contains(conf, []byte(other.PublicKey)) || request(http.MethodGet, "/sub/"+inactive.SubToken, nil).Body.Len() != 0 {
+		if bytes.Contains(preview.Body.Bytes(), []byte(other.PublicKey)) ||
+			request(http.MethodGet, "/sub/"+inactive.SubToken, nil).Body.Len() != 0 {
 			t.Fatal("inactive WireGuard client was included in the config or subscription")
 		}
 	}
@@ -172,114 +144,64 @@ func TestWireGuardClientSubscription(t *testing.T) {
 	}
 }
 
-func TestWireGuardConfigDownload(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "state.json")
-	db, err := store.Open(path)
+// Подписка — единственный способ выдать клиенту WireGuard: .conf больше не
+// генерируется, сервер работает userspace-inbound'ом Xray. Параметры ссылки
+// должны совпадать с форматом 3x-ui/v2rayN, иначе Throne не соберёт outbound.
+func TestWireGuardSubscriptionCarriesXrayParams(t *testing.T) {
+	db, err := store.Open(filepath.Join(t.TempDir(), "state.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	handler := (&Server{Store: db, NoAuth: true}).Handler()
-	call := func(path string) *httptest.ResponseRecorder {
-		w := httptest.NewRecorder()
-		handler.ServeHTTP(w, httptest.NewRequest(http.MethodGet, path, nil))
-		return w
-	}
 	draft := model.State{
 		Nodes: []model.Node{{ID: "hub", PublicAddr: "hub.example.com:2096"}},
 		Inbounds: []model.Inbound{
-			{ID: "in-vless", NodeID: "hub", Tag: "vless", Kind: "vless", Port: 443, Security: "none", Enabled: true},
 			{ID: "in-wg", NodeID: "hub", Tag: "wg", Kind: "wireguard", Port: 51820, Enabled: true},
 		},
-		Clients: []model.Client{
-			{Email: "alice", Enabled: true, Inbounds: []string{"in-vless", "in-wg"}},
-			{Email: "disabled", Inbounds: []string{"in-wg"}},
-		},
+		Clients: []model.Client{{Email: "alice", Enabled: true, Inbounds: []string{"in-wg"}}},
 	}
-	body, err := json.Marshal(draft)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if w := call("/api/wg-conf?client=missing"); w.Code != http.StatusNotFound {
-		t.Fatalf("неизвестный клиент: %d", w.Code)
-	}
+	body, _ := json.Marshal(draft)
 	put := httptest.NewRecorder()
 	handler.ServeHTTP(put, httptest.NewRequest(http.MethodPut, "/api/state", bytes.NewReader(body)))
 	if put.Code != http.StatusOK {
-		t.Fatalf("PUT /api/state: %d: %s", put.Code, put.Body.String())
+		t.Fatalf("PUT: %d %s", put.Code, put.Body.String())
 	}
 	st := db.Snapshot()
 	c := st.Clients[0]
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/sub/"+c.SubToken, nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("подписка: %d", w.Code)
+	}
+	raw, err := base64.StdEncoding.DecodeString(w.Body.String())
+	if err != nil {
+		t.Fatalf("payload не base64: %v", err)
+	}
+	link := strings.TrimSpace(string(raw))
+	u, err := url.Parse(link)
+	if err != nil {
+		t.Fatalf("ссылка не парсится: %v\n%s", err, link)
+	}
+	if u.Scheme != "wireguard" || u.User.Username() != c.WireGuard["in-wg"].PrivateKey {
+		t.Fatalf("private key должен быть userinfo: %s", link)
+	}
+	q := u.Query()
 	peer := c.WireGuard["in-wg"]
-
-	list := call("/api/wg-conf?client=" + c.ID)
-	if list.Code != http.StatusOK {
-		t.Fatalf("список конфигов: %d: %s", list.Code, list.Body.String())
-	}
-	if list.Header().Get("Cache-Control") != "no-store" {
-		t.Fatal("в ответе приватный ключ — кешировать нельзя")
-	}
-	var got struct {
-		Count   int `json:"count"`
-		Configs []struct {
-			Inbound string `json:"inbound"`
-			File    string `json:"file"`
-			Text    string `json:"text"`
-		} `json:"configs"`
-	}
-	if err := json.Unmarshal(list.Body.Bytes(), &got); err != nil {
-		t.Fatalf("список конфигов не JSON: %v: %s", err, list.Body.String())
-	}
-	if got.Count != 1 || len(got.Configs) != 1 || got.Configs[0].Inbound != "in-wg" {
-		t.Fatalf("ожидался конфиг только для WireGuard-инбаунда: %s", list.Body.String())
-	}
-	if got.Configs[0].File != "alice-wg.conf" {
-		t.Fatalf("имя файла = %q", got.Configs[0].File)
-	}
-
-	file := call("/api/wg-conf/in-wg?client=" + c.ID)
-	if file.Code != http.StatusOK {
-		t.Fatalf("скачивание конфига: %d: %s", file.Code, file.Body.String())
-	}
-	if cd := file.Header().Get("Content-Disposition"); cd != `attachment; filename="alice-wg.conf"` {
-		t.Errorf("Content-Disposition = %q", cd)
-	}
-	if ct := file.Header().Get("Content-Type"); ct != "application/octet-stream" {
-		t.Errorf("Content-Type = %q", ct)
-	}
-	if file.Header().Get("Cache-Control") != "no-store" {
-		t.Error("конфиг содержит приватный ключ и не должен кешироваться")
-	}
-	text := file.Body.String()
-	for _, want := range []string{
-		"PrivateKey = " + peer.PrivateKey,
-		"Address = " + peer.Address,
-		"PublicKey = " + st.Inbounds[1].WireGuard.PublicKey,
-		"PresharedKey = " + peer.PresharedKey,
-		"Endpoint = hub.example.com:51820",
-		"AllowedIPs = 0.0.0.0/0",
+	for k, want := range map[string]string{
+		"publickey":    st.Inbounds[0].WireGuard.PublicKey,
+		"presharedkey": peer.PresharedKey,
+		"address":      peer.Address,
+		"mtu":          "1420",
+		"keepalive":    "25",
 	} {
-		if !strings.Contains(text, want) {
-			t.Errorf("в конфиге нет %q:\n%s", want, text)
+		if got := q.Get(k); got != want {
+			t.Errorf("%s = %q, ожидалось %q", k, got, want)
 		}
 	}
-	if text != got.Configs[0].Text {
-		t.Error("скачанный файл и текст в списке расходятся")
+	if dns := q.Get("dns"); strings.Contains(dns, ",") {
+		t.Errorf("dns должен быть одним адресом, получено %q", dns)
 	}
-
-	// Не WireGuard-инбаунд, выключенный клиент и чужой клиент файла не дают.
-	for _, path := range []string{
-		"/api/wg-conf/in-vless?client=" + c.ID,
-		"/api/wg-conf/in-wg?client=" + st.Clients[1].ID,
-		"/api/wg-conf/in-wg?client=missing",
-	} {
-		if w := call(path); w.Code != http.StatusNotFound {
-			t.Errorf("%s: ожидался 404, получен %d: %s", path, w.Code, w.Body.String())
-		}
-	}
-	// Выключенному клиенту конфиг не положен, но панель отвечает списком.
-	if w := call("/api/wg-conf?client=" + st.Clients[1].ID); w.Code != http.StatusOK {
-		t.Errorf("выключенный клиент: %d: %s", w.Code, w.Body.String())
-	} else if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil || got.Count != 0 {
-		t.Errorf("выключенный клиент не должен получать конфиги: %s", w.Body.String())
+	if u.Host != "hub.example.com:51820" {
+		t.Errorf("endpoint = %q", u.Host)
 	}
 }

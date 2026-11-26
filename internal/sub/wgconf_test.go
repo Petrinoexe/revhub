@@ -43,7 +43,7 @@ func TestWireGuardConfigIsStandard(t *testing.T) {
 		"[Interface]\n",
 		"PrivateKey = " + peer.PrivateKey,
 		"Address = " + peer.Address,
-		"DNS = " + model.DefaultWireGuardDNS,
+		"DNS = 1.1.1.1",
 		"MTU = 1420",
 		"[Peer]\n",
 		"PublicKey = " + in.WireGuard.PublicKey,
@@ -123,6 +123,7 @@ func TestWireGuardConfigEndpointMatchesLink(t *testing.T) {
 func TestWireGuardLinkAndConfigShareInternalDNS(t *testing.T) {
 	st := wgState()
 	st.DNS = &model.DNSConfig{Root: "vpn.internal", NodeID: "hub"}
+	st.Inbounds[0].WireGuard.Kernel = true
 	links := Links(st, st.Clients[0])
 	if len(links) != 1 || !strings.Contains(links[0], "dns=10.88.0.1") {
 		t.Fatalf("ссылка не получила внутренний DNS: %v", links)
