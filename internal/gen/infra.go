@@ -60,6 +60,33 @@ func InfraWGConf(st model.State, nodeID string) (string, bool, error) {
 	b.WriteString("PostDown = iptables -D FORWARD -i %i -j ACCEPT 2>/dev/null || true\n")
 	b.WriteString("PostDown = iptables -D FORWARD -o %i -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true\n")
 
+	// wg-quick передаёт системе только адрес DNS. При нестандартном
+	// порте перенаправляем 53 только с wg-infra и только на адрес dnsmasq.
+	if dnsAddr, dnsPort := st.InfraDNSAddress(nodeID); dnsAddr != "" {
+		for _, protocol := range []string{"tcp", "udp"} {
+			input := fmt.Sprintf("-i %%i -d %s -p %s --dport %d -j ACCEPT", dnsAddr, protocol, dnsPort)
+			fmt.Fprintf(&b, "PostUp = if command -v iptables >/dev/null; then iptables -w -I INPUT %s; fi\n", input)
+			fmt.Fprintf(&b, "PostDown = iptables -w -D INPUT %s 2>/dev/null || true\n", input)
+		}
+		if dnsPort != model.DefaultDNSPort {
+			table := nftTable(ic.Interface + "-dns")
+			nftRules := []string{
+				fmt.Sprintf("add table ip %s", table),
+				fmt.Sprintf("add chain ip %s prerouting { type nat hook prerouting priority dstnat; }", table),
+				fmt.Sprintf(`add rule ip %s prerouting iifname "%%i" ip daddr %s meta l4proto { tcp, udp } th dport 53 redirect to :%d`, table, dnsAddr, dnsPort),
+			}
+			redirect := fmt.Sprintf("-i %%i -d %s --dport 53 -j REDIRECT --to-ports %d", dnsAddr, dnsPort)
+			fmt.Fprintf(&b, "PostUp = if command -v nft >/dev/null; then %s%s | nft -f -; else iptables -w -t nat -I PREROUTING -p tcp %s && iptables -w -t nat -I PREROUTING -p udp %s; fi\n",
+				printfNewline, shellJoin(nftRules), redirect, redirect)
+			fmt.Fprintf(&b, "PostDown = if command -v nft >/dev/null; then nft delete table ip %s 2>/dev/null || true; else iptables -w -t nat -D PREROUTING -p tcp %s 2>/dev/null || true; iptables -w -t nat -D PREROUTING -p udp %s 2>/dev/null || true; fi\n", table, redirect, redirect)
+		}
+	}
+
+	// Локальные назначения имеют приоритет над личным выходом пира.
+	// Этот маршрут не зависит от таблиц транспорта.
+	fmt.Fprintf(&b, "PostUp = ip -4 rule add iif %%i to %s lookup main pref 31899\n", ic.Subnet)
+	fmt.Fprintf(&b, "PostDown = ip -4 rule del iif %%i to %s lookup main pref 31899 2>/dev/null || true\n", ic.Subnet)
+
 	// Доступ пользовательских VPN-клиентов к инфраструктуре: их трафик приходит
 	// на клиентский WG-интерфейс, а уходит в wg-infra — это forward между двумя
 	// разными интерфейсами, и политика FORWARD=DROP его иначе съест. Правила
@@ -199,7 +226,11 @@ func InfraPeerConfig(st model.State, peer model.InfraPeer) (string, bool, error)
 	b.WriteString("[Interface]\n")
 	fmt.Fprintf(&b, "PrivateKey = %s\n", peer.PrivateKey)
 	fmt.Fprintf(&b, "Address = %s\n", peer.Address)
-	if dns := strings.TrimSpace(peer.DNS); dns != "" {
+	dns := strings.TrimSpace(peer.DNS)
+	if dns == "" {
+		dns, _ = st.InfraDNSAddress(ic.NodeID)
+	}
+	if dns != "" {
 		fmt.Fprintf(&b, "DNS = %s\n", dns)
 	}
 	fmt.Fprintf(&b, "MTU = %d\n", model.DefaultWireGuardMTU)

@@ -124,3 +124,18 @@ func TestValidTagsIncludeInfraOnHub(t *testing.T) {
 		t.Errorf("правило на infra должно проходить валидацию на хабе: %v", err)
 	}
 }
+
+func TestExplicitInfraDNSUsesFreedomBeforePort53Redirect(t *testing.T) {
+	st := xrayInfraState()
+	st.DNS = &model.DNSConfig{Root: "infra.test"}
+	st.Normalize()
+	rules := rulesOf(t, st, "hub")
+	dns := rules[1].(map[string]any)
+	if dns["outboundTag"] != model.TagInfra || dns["port"] != float64(53) || dns["network"] != "tcp,udp" ||
+		dns["ip"].([]any)[0] != st.Infra.ServerAddress() {
+		t.Fatalf("explicit DNS should match address and port before interception: %v", dns)
+	}
+	if redirect := rules[2].(map[string]any)["outboundTag"]; redirect != model.TagInfraDNS {
+		t.Fatalf("ordinary client DNS redirection rule is missing: %v", redirect)
+	}
+}

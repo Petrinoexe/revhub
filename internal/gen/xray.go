@@ -447,7 +447,13 @@ func buildRules(st model.State, nodeID string) ([]any, error) {
 	rules := []any{map[string]any{
 		"type": "field", "inboundTag": []string{apiTag}, "outboundTag": apiTag,
 	}}
-	if addr, _ := st.InfraDNSAddress(nodeID); addr != "" {
+	if addr, port := st.InfraDNSAddress(nodeID); addr != "" {
+		// Throne обращается прямо к dnsmasq. Порт 53 для остальных
+		// назначений по-прежнему обрабатывается перенаправлением.
+		rules = append(rules, map[string]any{
+			"type": "field", "ip": []string{addr}, "port": port,
+			"network": "tcp,udp", "outboundTag": model.TagInfra,
+		})
 		var tags []string
 		for _, in := range st.Inbounds {
 			if in.Enabled && in.NodeID == nodeID {

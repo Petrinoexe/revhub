@@ -165,3 +165,20 @@ func TestInfraDisabledNoArtifacts(t *testing.T) {
 		}
 	}
 }
+
+func TestInfraDNSPortForwardIsScopedToWireGuard(t *testing.T) {
+	st := dnsState()
+	st.DNS.Port = 5353
+	conf, ok, err := InfraWGConf(st, "hub")
+	if err != nil || !ok {
+		t.Fatalf("конфиг infra: %v", err)
+	}
+	for _, want := range []string{
+		`iifname "%i" ip daddr 10.89.0.1 meta l4proto { tcp, udp } th dport 53 redirect to :5353`,
+		"ip -4 rule add iif %i to 10.89.0.0/24 lookup main pref 31899",
+	} {
+		if !strings.Contains(conf, want) {
+			t.Errorf("в конфиге нет %q", want)
+		}
+	}
+}

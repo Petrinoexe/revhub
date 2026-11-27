@@ -46,7 +46,11 @@ type Decision struct {
 // Check возвращает точный матч и правила-претенденты с непроверяемыми
 // условиями, стоящие выше него.
 func Check(st model.State, q Query) Decision {
-	if addr, _ := st.InfraDNSAddress(q.Node); addr != "" {
+	if addr, port := st.InfraDNSAddress(q.Node); addr != "" {
+		if q.IP == addr && q.Port == strconv.Itoa(port) && (q.Network == "tcp" || q.Network == "udp") {
+			return Decision{Matched: true, RuleName: "DNS инфраструктуры", Outbound: model.TagInfra,
+				Reason: "запрос к адресу и порту dnsmasq идёт через Freedom infra"}
+		}
 		if q.Port == "53" && (q.Network == "tcp" || q.Network == "udp") {
 			for _, in := range st.Inbounds {
 				if in.Enabled && in.NodeID == q.Node && in.Tag == q.Inbound {

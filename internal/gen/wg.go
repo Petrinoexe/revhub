@@ -861,32 +861,48 @@ fi
 	}
 	if len(wgFiles) > 0 {
 		b.WriteString("install -d -m 700 /etc/wireguard\n")
-		// Инфра-интерфейс обновляется без перезапуска: wg syncconf меняет
-		// пиров на живом интерфейсе, не сбрасывая маршруты, NAT и сессии.
 		for _, f := range wgFiles {
 			if f != "wg-infra.conf" {
 				continue
 			}
+			// syncconf обновляет ключи и пиры. Сетевые хуки применяем отдельно,
+			// если изменились DNS или выход пира.
 			b.WriteString(`
-if ! install -m 600 wg-infra.conf /etc/wireguard/wg-infra.conf 2>/dev/null; then
-  echo "[revhub] не записался /etc/wireguard/wg-infra.conf (только для чтения?)" >&2
-  exit 1
-fi
+(
+infra_current=/etc/wireguard/wg-infra.conf
+infra_hooks() {
+  local action=$1 config=$2 hook
+  while IFS= read -r hook; do
+    (eval "${hook//%i/wg-infra}") || return 1
+  done < <(sed -n "s/^$action = //p" "$config")
+}
 if ip link show dev wg-infra >/dev/null 2>&1; then
-  sync_tmp=$(mktemp)
-  if wg-quick strip /etc/wireguard/wg-infra.conf > "$sync_tmp" 2>/dev/null && wg syncconf wg-infra "$sync_tmp"; then
-    rm -f -- "$sync_tmp"
-    echo "[revhub] wg-infra: пиры синхронизированы без перезапуска"
+  if ! cmp -s <(grep -E '^(Address|MTU|Table) = ' "$infra_current") <(grep -E '^(Address|MTU|Table) = ' wg-infra.conf); then
+    wg-quick down wg-infra
   else
-    rm -f -- "$sync_tmp"
-    echo "[revhub] wg-infra: syncconf не удался, перезапускаю интерфейс" >&2
-    wg-quick down wg-infra >/dev/null 2>&1 || true
-    wg-quick up wg-infra
+    infra_tmp=$(mktemp -d)
+    trap 'rm -rf -- "$infra_tmp"' EXIT
+    wg-quick strip ./wg-infra.conf > "$infra_tmp/next"
+    wg showconf wg-infra > "$infra_tmp/previous"
+    wg syncconf wg-infra "$infra_tmp/next"
+    if ! cmp -s <(grep -E '^Post(Up|Down) = ' "$infra_current") <(grep -E '^Post(Up|Down) = ' wg-infra.conf); then
+      infra_hooks PostDown "$infra_current"
+      if ! infra_hooks PostUp wg-infra.conf; then
+        infra_hooks PostDown wg-infra.conf || true
+        infra_hooks PostUp "$infra_current" || true
+        wg syncconf wg-infra "$infra_tmp/previous" || true
+        exit 1
+      fi
+    fi
+    install -m 600 wg-infra.conf "$infra_current"
+    echo "[revhub] wg-infra: пиры синхронизированы без перезапуска"
+    exit 0
   fi
-else
-  wg-quick up wg-infra
-  echo "[revhub] wg-infra: интерфейс поднят"
 fi
+install -m 600 wg-infra.conf "$infra_current"
+wg-quick up wg-infra
+echo "[revhub] wg-infra: интерфейс поднят"
+)
 if [ -d /run/systemd/system ]; then systemctl enable wg-quick@wg-infra.service >/dev/null 2>&1 || true; fi
 `)
 		}

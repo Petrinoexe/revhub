@@ -61,6 +61,8 @@ func TestWireGuardClientSubscription(t *testing.T) {
 			{ID: "in-vless", NodeID: "hub", Tag: "vless", Kind: "vless", Port: 443, Security: "none", Enabled: true},
 			{ID: "in-wg", NodeID: "hub", Tag: "wg", Kind: "wireguard", Port: 51820, Enabled: true},
 		},
+		Infra: &model.InfraConfig{Enabled: true, NodeID: "hub"},
+		DNS:   &model.DNSConfig{Root: "infra.test", Port: 5353},
 		Clients: []model.Client{
 			{Email: "alice", Enabled: true, Inbounds: []string{"in-vless", "in-wg"}},
 			{Email: "disabled", Inbounds: []string{"in-wg"}},
@@ -112,6 +114,26 @@ func TestWireGuardClientSubscription(t *testing.T) {
 	peer := c.WireGuard["in-wg"]
 	if wg.User.Username() != peer.PrivateKey || wg.Query().Get("presharedkey") != peer.PresharedKey || wg.Query().Get("publickey") != st.Inbounds[1].WireGuard.PublicKey {
 		t.Fatal("subscription does not match the saved credentials")
+	}
+	var downloads struct {
+		Configs []struct{ URL string } `json:"wireguard_configs"`
+	}
+	if err := json.Unmarshal(request(http.MethodGet, "/api/sub-link?client="+c.ID, nil).Body.Bytes(), &downloads); err != nil {
+		t.Fatal(err)
+	}
+	if len(downloads.Configs) != 1 {
+		t.Fatal("панель должна предлагать один клиентский .conf")
+	}
+	download := request(http.MethodGet, downloads.Configs[0].URL, nil)
+	for _, want := range []string{"DNS = 10.89.0.1", "Address = " + peer.Address,
+		"PublicKey = " + st.Inbounds[1].WireGuard.PublicKey, "Endpoint = hub.example.com:51820"} {
+		if !strings.Contains(download.Body.String(), want) {
+			t.Errorf("некорректный пользовательский .conf: нет %q", want)
+		}
+	}
+	if download.Header().Get("Cache-Control") != "no-store" ||
+		!strings.HasPrefix(download.Header().Get("Content-Disposition"), "attachment;") {
+		t.Fatal("конфиг должен скачиваться как приватный файл")
 	}
 	// Клиентский WireGuard теперь userspace-inbound Xray: в превью обязан быть
 	// protocol=wireguard с публичным ключом клиента, но никогда — приватным.

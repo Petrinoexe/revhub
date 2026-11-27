@@ -1,6 +1,7 @@
 package sub
 
 import (
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -33,8 +34,8 @@ func TestWireGuardConfigIsStandard(t *testing.T) {
 		t.Fatalf("ожидался один конфиг, получено %d", len(confs))
 	}
 	conf := confs[0]
-	if conf.Inbound != "in-wg" || conf.Tag != "wg-hub" || conf.File != "alice-revhub-wg-hub.conf" {
-		t.Fatalf("неверные метаданные конфига: %+v", conf)
+	if conf.Inbound != "in-wg" || conf.Tag != "wg-hub" || filepath.Ext(conf.File) != ".conf" || len(strings.TrimSuffix(conf.File, ".conf")) > 15 {
+		t.Fatalf("неверные метаданные конфига: %s %s %s", conf.Inbound, conf.Tag, conf.File)
 	}
 	in := st.Inbounds[0]
 	peer := c.WireGuard["in-wg"]
@@ -171,10 +172,10 @@ func TestWireGuardConfigRequiresActiveClientAndInbound(t *testing.T) {
 
 func TestWireGuardConfigFileName(t *testing.T) {
 	c := model.Client{Email: "Иван Петров"}
-	if got := fileName(c, "wg e2"); got != "wg-e2.conf" {
+	if got := fileName(c, "wg e2", "in-wg"); got != "wg-e2.conf" {
 		t.Errorf("имя файла = %q, ожидалось wg-e2.conf", got)
 	}
-	if got := fileName(model.Client{}, ""); got != "client.conf" {
+	if got := fileName(model.Client{}, "", ""); got != "client.conf" {
 		t.Errorf("имя файла = %q, ожидалось client.conf", got)
 	}
 }

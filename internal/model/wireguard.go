@@ -503,3 +503,18 @@ func (s State) validateWireGuardPort(index int, add func(string, ...any)) {
 		}
 	}
 }
+
+// WireGuardConfigFilename задаёт допустимое имя интерфейса для wg-quick.
+func WireGuardConfigFilename(stem, identity string) string {
+	var name strings.Builder
+	for _, r := range strings.ToLower(stem) {
+		if r >= 'a' && r <= 'z' || r >= '0' && r <= '9' || r == '-' || r == '_' || r == '.' {
+			name.WriteRune(r)
+		}
+	}
+	if clean := strings.Trim(name.String(), ".-"); clean != "" && len(clean) <= 15 {
+		return clean + ".conf"
+	}
+	sum := sha256.Sum256([]byte(identity))
+	return fmt.Sprintf("wg-%x.conf", sum[:6])
+}

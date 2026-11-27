@@ -515,7 +515,7 @@ function actions(tab,i,r){
     <button class="b" title="проверить пинг по туннелю" onclick="${stop}tunnelPing(${i})">📶</button>`;
   if(tab==='clients') b += `<button class="b" title="UUID" onclick="${stop}genUUID(${i})">🆔</button>
     <button class="b" title="токен подписки" onclick="${stop}genToken(${i})">🎫</button>
-    <button class="b" title="ссылки подписки" onclick="${stop}subLinks(${i})">sub</button>`;
+    <button class="b" title="конфигурации VPN-клиента" onclick="${stop}subLinks(${i})">Подключение</button>`;
   if(tab==='nodes'){
     b += `<button class="b" title="проверить сейчас" onclick="${stop}checkNodes()">🔍</button>`;
     b += `<button class="b" title="применить конфиг на узле" onclick="${stop}applyNode(${i})">⚙</button>
@@ -559,7 +559,7 @@ function bodyOf(tab,i,r){
       return inbound?.kind==='wireguard' && peer ? `${inbound.tag}: ${peer.address}` : '';
     }).filter(Boolean);
     if(addresses.length) html += `<div class="hint">WireGuard: ${esc(addresses.join(' · '))}</div>`;
-    html += `<div class="hint">UUID, токен подписки и ключи выбранных WireGuard-инбаундов заполняются при сохранении. Кнопка «sub» открывает ссылки, «wg» скачивает конфиг wg-quick (.conf).</div>`;
+    html += `<div class="hint">UUID, токен подписки и ключи выбранных WireGuard-инбаундов заполняются при сохранении. Кнопка «Подключение» открывает подписку Throne и клиентские конфиги WireGuard.</div>`;
   }
   return html;
 }
@@ -843,9 +843,28 @@ async function subLinks(i){
     const dialog = document.createElement('dialog');
     dialog.innerHTML = `<form method="dialog"><div class="f"><label for="sub-url">URL подписки</label><input id="sub-url" readonly></div>
       <div class="f"><label for="sub-links">Ссылки подключения</label><textarea id="sub-links" readonly></textarea></div>
-      <div class="row"><button class="b p">Закрыть</button></div></form>`;
-    dialog.querySelector('#sub-url').value = location.origin + j.url;
+      <div class="row">
+        <a class="b" id="sub-throne">Импорт подписки в Throne</a>
+        ${j.throne_route ? '<a class="b" id="sub-throne-route">Импорт профиля маршрутизации Throne</a>' : ''}
+        <button class="b p">Закрыть</button>
+      </div>
+      ${j.throne_route ? '<div class="mut">Подтвердите импорт профиля в Throne и один раз выберите его в настройках только этой группы подписки.</div>' : ''}
+      ${(j.wireguard_configs||[]).length ? '<div class="grp">Обычный VPN · WireGuard</div><div class="row" id="sub-wg-configs"></div>' : ''}
+      </form>`;
+    const subscriptionURL = new URL(j.url, location.origin).href;
+    dialog.querySelector('#sub-url').value = subscriptionURL;
     dialog.querySelector('#sub-links').value = (j.links||[]).join('\n');
+    dialog.querySelector('#sub-throne').href = 'throne://AddSub/' + btoa(subscriptionURL);
+    if(j.throne_route){
+      dialog.querySelector('#sub-throne-route').href = j.throne_route;
+    }
+    for(const config of j.wireguard_configs||[]){
+      const link = document.createElement('a');
+      link.className = 'b';
+      link.href = config.url;
+      link.textContent = 'Скачать .conf · ' + config.tag;
+      dialog.querySelector('#sub-wg-configs').append(link);
+    }
     dialog.addEventListener('close',()=>dialog.remove(),{once:true});
     document.body.appendChild(dialog);
     dialog.showModal();
@@ -902,10 +921,10 @@ function renderInfra(v){
         <td><input value="${esc(p.name||'')}" oninput="setInfraPeer(${i},'name',this.value)" placeholder="srv-db"></td>
         <td class="mut">${esc(p.address||'выдастся при сохранении')}</td>
         <td><input value="${esc(p.dns||'')}" onchange="setInfraPeer(${i},'dns',this.value.trim())"
-            aria-label="DNS пира" placeholder="IP через запятую"></td>
+            aria-label="DNS пира" placeholder="DNS хаба по умолчанию"></td>
         <td><input type="checkbox" ${p.enabled!==false?'checked':''} onchange="setInfraPeer(${i},'enabled',this.checked)"></td>
         <td><select onchange="setInfraPeer(${i},'egress',this.value)">${infraEgressOpts(p.egress)}</select></td>
-        <td><a class="b" href="/api/infra/${encodeURIComponent(p.id||p.name||'')}/wg-conf">wg</a>
+        <td>${ic.enabled && p.id && p.enabled ? `<a class="b" href="/api/infra/${encodeURIComponent(p.id)}/wg-conf">Скачать .conf хоста</a>` : ''}
             <button class="b" onclick="delInfraPeer(${i})">×</button></td>
       </tr>`).join('')}
     </tbody></table>`:'<div class="mut">пиров пока нет</div>'}`;

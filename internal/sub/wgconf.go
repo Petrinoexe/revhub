@@ -39,7 +39,7 @@ func WireGuardConfigs(st model.State, c model.Client) []Config {
 		out = append(out, Config{
 			Inbound: in.ID,
 			Tag:     in.Tag,
-			File:    fileName(c, in.Tag),
+			File:    fileName(c, in.Tag, in.ID),
 			Text:    wgConfigText(st, c, in, node, peer),
 		})
 	}
@@ -87,7 +87,7 @@ func wgConfigText(st model.State, c model.Client, in model.Inbound, node model.N
 
 // fileName — имя файла для скачивания: только ASCII, иначе часть клиентов
 // (Windows, Android) сохраняет файл с мусором в имени.
-func fileName(c model.Client, tag string) string {
+func fileName(c model.Client, tag, inboundID string) string {
 	stem := slug(c.Email)
 	if t := slug(tag); t != "" {
 		if stem != "" {
@@ -98,7 +98,7 @@ func fileName(c model.Client, tag string) string {
 	if stem == "" {
 		stem = "client"
 	}
-	return stem + ".conf"
+	return model.WireGuardConfigFilename(stem, c.ID+":"+inboundID+":"+stem)
 }
 
 func slug(s string) string {

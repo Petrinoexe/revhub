@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -66,6 +67,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/render", s.render)
 	mux.HandleFunc("GET /api/route-check", s.routeCheck)
 	mux.HandleFunc("GET /api/sub-link", s.subLink)
+	mux.HandleFunc("GET /api/clients/{client}/wg-conf/{inbound}", s.clientWGConfig)
 	mux.HandleFunc("GET /api/dns", s.dnsStatus)
 	mux.HandleFunc("GET /api/dns/check", s.dnsCheck)
 	mux.HandleFunc("GET /api/infra/{peer}/wg-conf", s.infraPeerConfig)
@@ -428,13 +430,49 @@ func (s *Server) subLink(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	links := sub.Links(st, c)
-	w.Header().Set("Cache-Control", "no-store")
-	writeJSON(w, http.StatusOK, map[string]any{
+	result := map[string]any{
 		"url":   "/sub/" + c.SubToken,
 		"count": len(links),
 		"links": links,
 		"b64":   sub.Payload(links),
-	})
+	}
+	if len(links) > 0 {
+		routeLink, err := sub.ThroneRouteLink(st, c)
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if routeLink != "" {
+			result["throne_route"] = routeLink
+		}
+	}
+	var wgConfigs []map[string]string
+	for _, config := range sub.WireGuardConfigs(st, c) {
+		wgConfigs = append(wgConfigs, map[string]string{
+			"tag": config.Tag,
+			"url": "/api/clients/" + url.PathEscape(c.ID) + "/wg-conf/" + url.PathEscape(config.Inbound),
+		})
+	}
+	if len(wgConfigs) > 0 {
+		result["wireguard_configs"] = wgConfigs
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	writeJSON(w, http.StatusOK, result)
+}
+
+// clientWGConfig отдаёт только конфиг пользовательского Xray-инбаунда.
+func (s *Server) clientWGConfig(w http.ResponseWriter, r *http.Request) {
+	st := s.Store.Snapshot()
+	c, ok := clientByID(st, r.PathValue("client"))
+	if ok {
+		for _, config := range sub.WireGuardConfigs(st, c) {
+			if config.Inbound == r.PathValue("inbound") {
+				writeWGConfig(w, config.File, config.Text)
+				return
+			}
+		}
+	}
+	writeErr(w, http.StatusNotFound, "конфиг клиентского WireGuard не найден")
 }
 
 // clientByID ищет клиента в снимке состояния.

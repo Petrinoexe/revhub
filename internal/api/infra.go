@@ -3,9 +3,9 @@ package api
 import (
 	"fmt"
 	"net/http"
-	"strings"
 
 	"revhub/internal/gen"
+	"revhub/internal/model"
 )
 
 // infraPeerConfig отдаёт wg-quick конфиг инфраструктурного пира: без него
@@ -26,16 +26,15 @@ func (s *Server) infraPeerConfig(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, http.StatusNotFound, "пир выключен или инфра-сеть не настроена")
 			return
 		}
-		name := p.Name
-		if name == "" {
-			name = p.ID
-		}
-		name = strings.NewReplacer("/", "-", "\\", "-", "\"", "", "\n", "", "\r", "").Replace(name)
-		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", name+".conf"))
-		w.Header().Set("Cache-Control", "no-store")
-		_, _ = w.Write([]byte(conf))
+		writeWGConfig(w, model.WireGuardConfigFilename(p.Name, p.ID), conf)
 		return
 	}
 	http.Error(w, "пир не найден", http.StatusNotFound)
+}
+
+func writeWGConfig(w http.ResponseWriter, fileName, content string) {
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", fileName))
+	w.Header().Set("Cache-Control", "no-store")
+	_, _ = w.Write([]byte(content))
 }

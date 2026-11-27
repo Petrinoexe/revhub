@@ -23,6 +23,7 @@ func TestInfraPeerConfigEndpoint(t *testing.T) {
 	st := model.State{
 		Nodes: []model.Node{{ID: "hub", PublicAddr: "hub.example.com:2096"}},
 		Infra: &model.InfraConfig{Enabled: true, NodeID: "hub"},
+		DNS:   &model.DNSConfig{Root: "infra.test", Port: 5353},
 		InfraPeers: []model.InfraPeer{
 			{Name: "srv-db", Enabled: true},
 			{Name: "off", Enabled: false},
@@ -47,7 +48,7 @@ func TestInfraPeerConfigEndpoint(t *testing.T) {
 	}
 	text := w.Body.String()
 	for _, want := range []string{"PrivateKey = " + peer.PrivateKey, "Address = " + peer.Address,
-		"PublicKey = " + saved.Infra.PublicKey, "AllowedIPs = 0.0.0.0/0", "Endpoint = hub.example.com:51840"} {
+		"PublicKey = " + saved.Infra.PublicKey, "AllowedIPs = 0.0.0.0/0", "DNS = 10.89.0.1", "Endpoint = hub.example.com:51840"} {
 		if !strings.Contains(text, want) {
 			t.Errorf("в конфиге нет %q\n%s", want, text)
 		}
