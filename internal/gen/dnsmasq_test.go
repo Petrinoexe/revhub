@@ -55,9 +55,8 @@ func TestDNSMasqRendersZone(t *testing.T) {
 		"no-hosts\n",
 		"domain=infra.cringe\n",
 		"local=/infra.cringe/\n",
-		"no-resolv\n",
-		"server=1.1.1.1@" + src + "\n",
-		"server=1.0.0.1@" + src + "\n",
+		"no-resolv\nstrict-order\n",
+		"server=1.1.1.1@" + src + "\nserver=1.0.0.1@" + src + "\nserver=77.88.8.8@" + src + "\n",
 		"addn-hosts=/etc/dnsmasq.d/revhub/hosts\n",
 	} {
 		if !strings.Contains(files.Conf, want) {
@@ -97,13 +96,13 @@ func TestDNSZoneWithoutClientInbound(t *testing.T) {
 
 func TestDNSMasqExplicitUpstream(t *testing.T) {
 	st := dnsState()
-	st.DNS.Upstream = []string{"9.9.9.9", "1.1.1.1:5353"}
+	st.DNS.Upstream = []string{"77.88.8.8:53", "9.9.9.9", "1.1.1.1:5353"}
 	files, _, err := DNSMasq(st, "hub")
 	if err != nil {
 		t.Fatal(err)
 	}
 	src := dnsSource(t, st)
-	for _, want := range []string{"no-resolv\n", "server=9.9.9.9@" + src + "\n", "server=1.1.1.1#5353@" + src + "\n"} {
+	for _, want := range []string{"no-resolv\nstrict-order\nserver=9.9.9.9@" + src + "\nserver=1.1.1.1#5353@" + src + "\nserver=77.88.8.8@" + src + "\n"} {
 		if !strings.Contains(files.Conf, want) {
 			t.Errorf("нет %q:\n%s", want, files.Conf)
 		}

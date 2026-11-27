@@ -51,7 +51,11 @@ func DNSMasq(st model.State, nodeID string) (DNSMasqFiles, bool, error) {
 		upstreams = []string{"1.1.1.1", "1.0.0.1"}
 	}
 	source := dnsTunnelSource(st, nodeID)
-	b.WriteString("no-resolv\n")
+	if source != "" {
+		source = "@" + source
+	}
+	b.WriteString("no-resolv\nstrict-order\n")
+	const fallback = "77.88.8.8"
 	for _, up := range upstreams {
 		addr, err := model.ResolverAddr(up)
 		if err != nil {
@@ -61,15 +65,16 @@ func DNSMasq(st model.State, nodeID string) (DNSMasqFiles, bool, error) {
 		if err != nil {
 			return DNSMasqFiles{}, false, err
 		}
+		if host == fallback && port == "53" {
+			continue
+		}
 		target := host
 		if port != "53" {
 			target = host + "#" + port
 		}
-		if source != "" {
-			target += "@" + source
-		}
-		fmt.Fprintf(&b, "server=%s\n", target)
+		fmt.Fprintf(&b, "server=%s%s\n", target, source)
 	}
+	fmt.Fprintf(&b, "server=%s%s\n", fallback, source)
 	fmt.Fprintf(&b, "addn-hosts=%s\n", DNSHostsPath)
 
 	var h strings.Builder
